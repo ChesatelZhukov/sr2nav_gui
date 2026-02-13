@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТОЕ ПРЕДСТАВЛЕНИЕ - Окно анализа GPS созвездия.
-ИСПРАВЛЕНО: отображение метрик в минутах, а не абсолютных интервалах.
+ИСПРАВЛЕНО v2.0: добавлено контекстное меню с временем в формате GPS Week
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
-from typing import Dict, List, Optional, Any
-from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timedelta
+import pyperclip  # для копирования в буфер обмена
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
@@ -21,7 +22,7 @@ class GPSAnalysisWindow:
     Окно отображения результатов анализа GPS созвездия.
     ТОЛЬКО UI, никаких вычислений!
     
-    ИСПРАВЛЕНО: показываем интервалы/минуту, цвет по частоте пропаданий.
+    ИСПРАВЛЕНО v2.0: добавлено контекстное меню с временем в формате GPS Week
     """
     
     ALL_SATELLITES = [f'G{i:02d}' for i in range(1, 33)]
@@ -37,6 +38,9 @@ class GPSAnalysisWindow:
         'invisible': '#6c757d',  # серый
     }
     
+    # GPS эпоха (начало отсчета недель)
+    GPS_EPOCH = datetime(1980, 1, 6)
+    
     def __init__(self, parent, controller):
         self.parent = parent
         self.controller = controller
@@ -47,6 +51,12 @@ class GPSAnalysisWindow:
         self.current_filename = None
         self.current_fig = None
         self.current_canvas = None
+        self.current_ax = None
+        
+        # Для контекстного меню
+        self.context_menu = None
+        self.last_click_coords = None
+        self.last_click_time = None
         
         self.window = tk.Toplevel(parent)
         self.window.title("Анализ GPS созвездия - Оценка стабильности")
@@ -61,6 +71,271 @@ class GPSAnalysisWindow:
         self.setup_text_tags()
         
         self.controller.request_gps_analysis(self)
+    
+    # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ СО ВРЕМЕНЕМ ====================
+    
+    def gps_seconds_to_datetime(self, gps_seconds: float) -> datetime:
+        """
+        Преобразует GPS секунды от начала недели в datetime.
+        
+        Args:
+            gps_seconds: Количество секунд от начала GPS недели (воскресенье, 00:00:00)
+            
+        Returns:
+            datetime объект с учетом текущей GPS недели
+        """
+        # Текущая дата для определения недели
+        now = datetime.now()
+        
+        # Количество дней от GPS эпохи до сегодня
+        days_since_epoch = (now - self.GPS_EPOCH).days
+        
+        # Текущая GPS неделя
+        current_gps_week = days_since_epoch // 7
+        
+        # Начало текущей GPS недели
+        week_start = self.GPS_EPOCH + timedelta(weeks=current_gps_week)
+        
+        # Добавляем секунды
+        return week_start + timedelta(seconds=gps_seconds)
+    
+    def format_gps_time(self, gps_seconds: float) -> str:
+        """
+        Форматирует GPS время в нужный формат.
+        
+        Returns:
+            Строка в формате "2024:08:27:01:44:01.5"
+        """
+        dt = self.gps_seconds_to_datetime(gps_seconds)
+        return dt.strftime("%Y:%m:%d:%H:%M:%S") + f".{int((gps_seconds % 1) * 10)}"
+    
+    def get_satellite_at_position(self, x: float, y: float) -> Tuple[Optional[str], Optional[Dict]]:
+        """
+        Определяет спутник по координатам клика.
+        
+        Returns:
+            (prn, stats) или (None, None) если не найден
+        """
+        if not self.current_filename or not self.analysis_results:
+            return None, None
+        
+        result = self.analysis_results[self.current_filename]
+        satellite_stats = result.get('satellite_stats', {})
+        
+        # y координата на графике (от 0 до 31)
+        sat_index = int(round(32 - y))  # инвертируем, так как y идет сверху вниз
+        if 1 <= sat_index <= 32:
+            prn = f"G{sat_index:02d}"
+            if prn in satellite_stats:
+                return prn, satellite_stats[prn]
+        
+        return None, None
+    
+    # ==================== КОНТЕКСТНОЕ МЕНЮ ====================
+    
+    def create_context_menu(self):
+        """Создает контекстное меню для графика."""
+        self.context_menu = tk.Menu(self.window, tearoff=0, bg=Theme.BG_SECONDARY, fg=Theme.FG_PRIMARY)
+        self.context_menu.add_command(label="📋 Копировать время", command=self.copy_time_to_clipboard)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="📋 Копировать время и спутник", command=self.copy_time_and_satellite)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="🔍 Показать спутник", command=self.show_satellite_info)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="⟲ Сбросить зум", command=self.reset_zoom)
+    
+    def show_context_menu(self, event):
+        """
+        Показывает контекстное меню при правом клике.
+        
+        Args:
+            event: Событие клика мыши
+        """
+        if not self.current_ax or not self.current_fig:
+            return
+        
+        # Получаем координаты клика в данных графика
+        if event.inaxes != self.current_ax:
+            return
+        
+        self.last_click_coords = (event.xdata, event.ydata)
+        self.last_click_time = event.xdata
+        
+        # Создаем меню, если его нет
+        if not self.context_menu:
+            self.create_context_menu()
+        
+        # Показываем меню
+        try:
+            self.context_menu.tk_popup(event.guiEvent.x_root, event.guiEvent.y_root)
+        finally:
+            self.context_menu.grab_release()
+    
+    def copy_time_to_clipboard(self):
+        """Копирует время в буфер обмена."""
+        if self.last_click_time is None:
+            return
+        
+        time_str = self.format_gps_time(self.last_click_time)
+        
+        try:
+            pyperclip.copy(time_str)
+            self.show_status_message(f"✓ Время скопировано: {time_str}", Theme.SUCCESS)
+        except Exception as e:
+            self.show_status_message(f"✗ Ошибка копирования: {e}", Theme.ERROR)
+    
+    def copy_time_and_satellite(self):
+        """Копирует время и информацию о спутнике."""
+        if self.last_click_time is None or self.last_click_coords is None:
+            return
+        
+        time_str = self.format_gps_time(self.last_click_time)
+        prn, stats = self.get_satellite_at_position(*self.last_click_coords)
+        
+        if prn:
+            if stats and stats.get('is_visible', False):
+                ipm = stats.get('intervals_per_minute', 0)
+                visibility = stats.get('visibility_percent', 0)
+                result = f"{time_str}\t{prn}\t{ipm:.3f}/мин\t{visibility:.1f}%"
+            else:
+                result = f"{time_str}\t{prn}\tне виден"
+        else:
+            result = time_str
+        
+        try:
+            pyperclip.copy(result)
+            self.show_status_message(f"✓ Данные скопированы", Theme.SUCCESS)
+        except Exception as e:
+            self.show_status_message(f"✗ Ошибка копирования: {e}", Theme.ERROR)
+    
+    def show_satellite_info(self):
+        """Показывает информацию о спутнике во всплывающем окне."""
+        if self.last_click_coords is None:
+            return
+        
+        prn, stats = self.get_satellite_at_position(*self.last_click_coords)
+        if not prn:
+            self.show_status_message("✗ Спутник не найден", Theme.WARNING)
+            return
+        
+        # Создаем всплывающее окно
+        info_window = tk.Toplevel(self.window)
+        info_window.title(f"Информация о спутнике {prn}")
+        info_window.geometry("400x300")
+        info_window.configure(bg=Theme.BG_PRIMARY)
+        info_window.transient(self.window)
+        info_window.grab_set()
+        
+        # Центрируем
+        info_window.update_idletasks()
+        x = self.window.winfo_rootx() + (self.window.winfo_width() - 400) // 2
+        y = self.window.winfo_rooty() + (self.window.winfo_height() - 300) // 2
+        info_window.geometry(f"+{x}+{y}")
+        
+        main = tk.Frame(info_window, bg=Theme.BG_PRIMARY, padx=20, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        
+        # Заголовок
+        tk.Label(
+            main,
+            text=f"🛰️ Спутник {prn}",
+            font=("Arial", 14, "bold"),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
+        ).pack(pady=(0, 15))
+        
+        if stats and stats.get('is_visible', False):
+            # Статистика по спутнику
+            ipm = stats.get('intervals_per_minute', 0)
+            num_intervals = stats.get('num_intervals', 0)
+            total_time = stats.get('total_visible_time', 0)
+            visibility = stats.get('visibility_percent', 0)
+            avg_duration = stats.get('avg_duration', 0)
+            
+            # Категория
+            if ipm <= 0.01:
+                category = "Эталонный"
+                color = self.STABILITY_COLORS['excellent']
+            elif ipm <= 0.05:
+                category = "Отличный"
+                color = self.STABILITY_COLORS['excellent']
+            elif ipm <= 0.1:
+                category = "Хороший"
+                color = self.STABILITY_COLORS['good']
+            elif ipm <= 0.2:
+                category = "Умеренный"
+                color = self.STABILITY_COLORS['moderate']
+            elif ipm <= 0.5:
+                category = "Нестабильный"
+                color = self.STABILITY_COLORS['unstable']
+            elif ipm <= 1.0:
+                category = "Плохой"
+                color = self.STABILITY_COLORS['bad']
+            else:
+                category = "Критический"
+                color = self.STABILITY_COLORS['critical']
+            
+            stats_frame = tk.Frame(main, bg=Theme.BG_PRIMARY)
+            stats_frame.pack(fill=tk.BOTH, expand=True)
+            
+            metrics = [
+                ("Категория:", category, color),
+                ("Частота пропаданий:", f"{ipm:.3f} инт/мин", color),
+                ("Количество интервалов:", str(num_intervals), Theme.FG_PRIMARY),
+                ("Общее время видимости:", f"{total_time:.0f} с ({visibility:.1f}%)", Theme.FG_PRIMARY),
+                ("Средняя длительность:", f"{avg_duration:.1f} с", Theme.FG_PRIMARY),
+            ]
+            
+            for i, (label, value, fg_color) in enumerate(metrics):
+                row = tk.Frame(stats_frame, bg=Theme.BG_PRIMARY)
+                row.pack(fill=tk.X, pady=2)
+                
+                tk.Label(
+                    row,
+                    text=label,
+                    font=("Arial", 10, "bold"),
+                    bg=Theme.BG_PRIMARY,
+                    fg=Theme.FG_SECONDARY,
+                    width=20,
+                    anchor="w",
+                ).pack(side=tk.LEFT)
+                
+                tk.Label(
+                    row,
+                    text=value,
+                    font=("Arial", 10),
+                    bg=Theme.BG_PRIMARY,
+                    fg=fg_color,
+                    anchor="w",
+                ).pack(side=tk.LEFT, padx=(5, 0))
+        else:
+            tk.Label(
+                main,
+                text="Спутник не виден в данном файле",
+                font=("Arial", 11),
+                bg=Theme.BG_PRIMARY,
+                fg=Theme.FG_SECONDARY,
+            ).pack(expand=True)
+        
+        # Кнопка закрытия
+        ModernButton(
+            main,
+            text="Закрыть",
+            command=info_window.destroy,
+            width=15,
+            font=("Arial", 10),
+        ).pack(pady=(20, 0))
+    
+    def show_status_message(self, message: str, color: str = None):
+        """Показывает временное сообщение в статусной строке."""
+        if hasattr(self, 'status_label'):
+            original_text = self.status_label.cget('text')
+            original_fg = self.status_label.cget('fg')
+            
+            self.status_label.config(text=message, fg=color if color else Theme.SUCCESS)
+            self.window.after(3000, lambda: self.status_label.config(text=original_text, fg=original_fg))
+    
+    # ==================== ОРИГИНАЛЬНЫЕ МЕТОДЫ (БЕЗ ИЗМЕНЕНИЙ) ====================
     
     def on_close(self):
         try:
@@ -376,9 +651,8 @@ class GPSAnalysisWindow:
             quality = self.analysis_results[filename].get('overall_quality', {})
             self.update_quality_display(quality)
     
-
     def update_plot_tab(self):
-        """Обновляет вкладку с графиком - ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ"""
+        """Обновляет вкладку с графиком - ИСПРАВЛЕНО v2.0: добавлено контекстное меню"""
         for widget in self.plot_frame.winfo_children():
             widget.destroy()
         
@@ -392,39 +666,13 @@ class GPSAnalysisWindow:
             ).pack(expand=True)
             return
         
-        print(f"\n{'='*60}")
-        print(f"ОТРИСОВКА ГРАФИКА: {self.current_filename}")
-        print(f"{'='*60}")
-        
         result = self.analysis_results[self.current_filename]
         satellite_stats = result.get('satellite_stats', {})
-        
-        # ПРОВЕРЯЕМ, ЧТО ПРИШЛО
-        print(f"Тип данных: {type(satellite_stats)}")
-        print(f"Количество спутников в stats: {len(satellite_stats)}")
-        
-        if satellite_stats:
-            # Возьмем первый спутник для проверки
-            sample_sat = list(satellite_stats.keys())[0]
-            sample_stats = satellite_stats[sample_sat]
-            print(f"\nПРОВЕРКА СПУТНИКА {sample_sat}:")
-            print(f"  is_visible: {sample_stats.get('is_visible', False)}")
-            print(f"  num_intervals: {sample_stats.get('num_intervals', 0)}")
-            print(f"  intervals_per_minute: {sample_stats.get('intervals_per_minute', 999)}")
-            print(f"  stability_category: {sample_stats.get('stability_category', ('N/A', 'N/A'))}")
-            
-            # Проверяем все видимые спутники
-            print(f"\nВСЕ ВИДИМЫЕ СПУТНИКИ:")
-            for sat, stats in satellite_stats.items():
-                if stats.get('is_visible', False):
-                    ipm = stats.get('intervals_per_minute', 999)
-                    cat = stats.get('stability_category', ('N/A', 'N/A'))
-                    cat_name = cat[0] if isinstance(cat, tuple) else cat
-                    print(f"  {sat}: ИПМ={ipm:.3f}, категория={cat_name}")
         
         try:
             fig, ax = plt.subplots(figsize=(16, 14))
             fig.patch.set_facecolor('white')
+            self.current_ax = ax  # Сохраняем для контекстного меню
             
             time_range = result.get('data', {}).get('time_range', (0, 1))
             total_duration = result.get('data', {}).get('total_duration', 1)
@@ -443,7 +691,6 @@ class GPSAnalysisWindow:
             for i, sat in enumerate(self.ALL_SATELLITES):
                 y_pos = len(self.ALL_SATELLITES) - i - 1
                 
-                # По умолчанию - спутник отсутствует (серый)
                 color = '#CCCCCC'
                 alpha = 0.05
                 is_visible = False
@@ -455,16 +702,14 @@ class GPSAnalysisWindow:
                 if sat in satellite_stats:
                     stats = satellite_stats[sat]
                     
-                    # ИСПРАВЛЕНИЕ: stats может быть словарем или объектом SatelliteStatistics
+                    # Определяем тип данных и извлекаем значения
                     if hasattr(stats, 'get'):
-                        # Это словарь
                         is_visible = stats.get('is_visible', False)
                         ipm = stats.get('intervals_per_minute', 999)
                         num_intervals = stats.get('num_intervals', 0)
                         visibility_percent = stats.get('visibility_percent', 0)
                         intervals = stats.get('intervals', [])
                     else:
-                        # Это объект SatelliteStatistics
                         is_visible = stats.is_visible
                         ipm = stats.intervals_per_minute
                         num_intervals = stats.num_intervals
@@ -472,45 +717,42 @@ class GPSAnalysisWindow:
                         intervals = stats.intervals if hasattr(stats, 'intervals') else []
                     
                     if is_visible:
-                        # ============ ИСПРАВЛЕННАЯ ЛОГИКА ЦВЕТОВ ============
-                        # Эталонный/Отличный - зеленый
-                        if ipm <= 0.05:
-                            color = self.STABILITY_COLORS['excellent']  # #198754
+                        # Определяем цвет по частоте
+                        if ipm <= 0.01:  # Один непрерывный интервал
+                            color = self.STABILITY_COLORS['excellent']
+                            alpha = 0.8
+                            excellent_count += 1
+                        elif ipm <= 0.05:
+                            color = self.STABILITY_COLORS['excellent']
                             alpha = 0.7
                             excellent_count += 1
-                        # Хороший - синий
                         elif ipm <= 0.1:
-                            color = self.STABILITY_COLORS['good']  # #0d6efd
+                            color = self.STABILITY_COLORS['good']
                             alpha = 0.7
                             good_count += 1
-                        # Умеренный - оранжевый
                         elif ipm <= 0.2:
-                            color = self.STABILITY_COLORS['moderate']  # #fd7e14
+                            color = self.STABILITY_COLORS['moderate']
                             alpha = 0.7
                             moderate_count += 1
-                        # Нестабильный - красный
                         elif ipm <= 0.5:
-                            color = self.STABILITY_COLORS['unstable']  # #dc3545
+                            color = self.STABILITY_COLORS['unstable']
                             alpha = 0.7
                             unstable_count += 1
-                        # Плохой - темно-красный
                         elif ipm <= 1.0:
-                            color = self.STABILITY_COLORS['bad']  # #b02a37
+                            color = self.STABILITY_COLORS['bad']
                             alpha = 0.7
                             bad_count += 1
-                        # Критический - очень темный красный
                         else:
-                            color = self.STABILITY_COLORS['critical']  # #8b0000
+                            color = self.STABILITY_COLORS['critical']
                             alpha = 0.7
                             critical_count += 1
                         
                         # Прозрачность зависит от процента видимости
                         alpha = 0.3 + 0.5 * (visibility_percent / 100)
                         
-                        # Отрисовка интервалов
+                        # Отрисовка ОБЪЕДИНЕННЫХ интервалов
                         if intervals:
                             for interval in intervals:
-                                # interval может быть словарем или объектом
                                 if hasattr(interval, 'get'):
                                     start = interval.get('start', 0)
                                     end = interval.get('end', 0)
@@ -529,9 +771,8 @@ class GPSAnalysisWindow:
                                     linewidth=0.5
                                 )
                         
-                        # Маркер только для проблемных (>0.2/мин И >1 интервал)
-                        is_problematic = ipm > 0.2 and num_intervals > 1
-                        if is_problematic:
+                        # Маркер только для проблемных (>0.2/мин)
+                        if ipm > 0.2:
                             ax.plot(
                                 time_range[0] + 10, y_pos,
                                 marker='v',
@@ -541,7 +782,7 @@ class GPSAnalysisWindow:
                                 markeredgewidth=1
                             )
                     else:
-                        # Спутник есть в статистике, но видимость 0% - серый с низкой прозрачностью
+                        # Спутник не виден - пустая полоса
                         ax.barh(
                             y=y_pos,
                             width=0,
@@ -549,24 +790,6 @@ class GPSAnalysisWindow:
                             color='#CCCCCC',
                             alpha=0.1
                         )
-                else:
-                    # НЕТ ДАННЫХ - серый с очень низкой прозрачностью
-                    ax.barh(
-                        y=y_pos,
-                        width=0,
-                        height=0.7,
-                        color='#CCCCCC',
-                        alpha=0.05
-                    )
-            
-            print(f"\nСТАТИСТИКА ЦВЕТОВ:")
-            print(f"  Эталон/Отлично: {excellent_count}")
-            print(f"  Хорошо: {good_count}")
-            print(f"  Умеренно: {moderate_count}")
-            print(f"  Нестабильно: {unstable_count}")
-            print(f"  Плохо: {bad_count}")
-            print(f"  Критично: {critical_count}")
-            print(f"{'='*60}\n")
             
             # Настройка осей
             ax.set_yticks(np.arange(len(self.ALL_SATELLITES)))
@@ -576,7 +799,6 @@ class GPSAnalysisWindow:
             ax.set_xlabel('Время наблюдения (секунды)', fontsize=12)
             ax.set_ylabel('Спутники GPS', fontsize=12)
             
-            # Заголовок с длительностью и статистикой
             quality = result.get('overall_quality', {})
             
             if duration_hours >= 1:
@@ -617,7 +839,7 @@ class GPSAnalysisWindow:
             
             legend_elements = [
                 Patch(facecolor=self.STABILITY_COLORS['excellent'], alpha=0.7, 
-                    label='Эталон/Отлично (<0.05/мин)'),
+                    label='Эталон/Отлично (<0.05/мин или 1 интервал)'),
                 Patch(facecolor=self.STABILITY_COLORS['good'], alpha=0.7, 
                     label='Хорошо (0.05-0.1/мин)'),
                 Patch(facecolor=self.STABILITY_COLORS['moderate'], alpha=0.7, 
@@ -631,7 +853,7 @@ class GPSAnalysisWindow:
                 Patch(facecolor='#CCCCCC', alpha=0.2, 
                     label='Не виден / нет данных'),
                 Line2D([0], [0], marker='v', color='w', markerfacecolor='red',
-                    markersize=8, label='Проблемный (>0.2/мин, >1 интервал)',
+                    markersize=8, label='Проблемный (>0.2/мин)',
                     markeredgecolor='darkred')
             ]
             
@@ -641,6 +863,9 @@ class GPSAnalysisWindow:
             
             canvas = FigureCanvasTkAgg(fig, self.plot_frame)
             canvas.draw()
+            
+            # ИСПРАВЛЕНИЕ: подключаем контекстное меню
+            canvas.mpl_connect('button_press_event', self.on_canvas_click)
             
             self.interactive_zoom = InteractiveZoom(fig, [ax])
             self.current_fig = fig
@@ -658,7 +883,19 @@ class GPSAnalysisWindow:
                 fg=Theme.ERROR,
                 bg=Theme.BG_PRIMARY,
             ).pack(expand=True)
-
+    
+    def on_canvas_click(self, event):
+        """
+        Обработчик кликов на canvas.
+        
+        Args:
+            event: Событие matplotlib
+        """
+        if event.button == 3:  # Правая кнопка мыши
+            self.show_context_menu(event)
+        elif event.button == 1 and event.dblclick:  # Двойной клик левой
+            if self.interactive_zoom:
+                self.interactive_zoom.reset_all_zooms()
 
     def update_stats_tab(self):
         """Обновляет вкладку со статистикой - акцент на частоту/мин."""

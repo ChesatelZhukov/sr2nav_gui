@@ -102,8 +102,8 @@ class MainWindow:
         """Создание главного окна."""
         self._root = tk.Tk()
         self._root.title("SR2NAV Studio — Обработка GNSS данных")
-        self._root.geometry("1400x800")
-        self._root.minsize(1300, 700)
+        self._root.geometry("1400x850")
+        self._root.minsize(1400, 850)
         self._root.configure(bg=Theme.BG_PRIMARY)
         
         self._root.update_idletasks()

@@ -47,7 +47,10 @@ class ApplicationController:
         
         # MODEL - чистая бизнес-логика
         self._file_manager = FileManager(APP_CONTEXT, self._publish_message)
-        self._process_runner = ProcessRunner(self._publish_message)
+        
+        # ИСПРАВЛЕНО: передаём функцию, принимающую AppMessage
+        self._process_runner = ProcessRunner(self._publish_message)  # Прямая передача
+        
         self._gps_excluder = GPSExcluder(APP_CONTEXT)
         self._file_transformer = FileTransformer(self._publish_message)
         self._velocity_analyzer = VelocityAnalyzer()

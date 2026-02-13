@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТАЯ МОДЕЛЬ - Анализатор GPS созвездия.
-ИСПРАВЛЕНО:
-1. Нормализация метрики intervals_per_minute по частоте дискретизации
-2. Корректное объединение интервалов при коротких пропаданиях
-3. Реалистичная оценка стабильности для разных частот данных
+ИСПРАВЛЕНО v3.0:
+1. Корректное разделение: raw_intervals для частоты, merged_intervals для отображения
+2. Пиковая частота считается по raw_intervals (микро-интервалам)
+3. Для одного непрерывного интервала частота = 0.0
 """
 import os
 import numpy as np
@@ -39,105 +39,152 @@ class SatelliteStatistics:
     min_duration: float = 0.0
     visibility_percent: float = 0.0
     is_visible: bool = False
-    intervals: List[SatelliteInterval] = field(default_factory=list)
-    sampling_rate_hz: float = 10.0  # ИСПРАВЛЕНО: частота дискретизации по умолчанию
+    intervals: List[SatelliteInterval] = field(default_factory=list)        # ОБЪЕДИНЕННЫЕ интервалы (для графика)
+    raw_intervals: List[SatelliteInterval] = field(default_factory=list)    # СЫРЫЕ интервалы (для расчета частоты)
+    sampling_rate_hz: float = 10.0
+    
+    # Пиковые метрики
+    peak_intervals_per_minute: float = 0.0
+    """Максимальное количество интервалов в 10-минутном окне, пересчитанное в минуты"""
+    
+    peak_intervals_per_minute_norm: float = 0.0
+    """Нормализованная пиковая частота (приведена к 10 Гц)"""
+    
+    peak_window_center: float = 0.0
+    """Центр окна с максимальной частотой (сек)"""
+    
+    peak_window_start: float = 0.0
+    """Начало окна с максимальной частотой (сек)"""
+    
+    peak_window_end: float = 0.0
+    """Конец окна с максимальной частотой (сек)"""
+    
+    peak_window_count: int = 0
+    """Количество интервалов в пиковом окне"""
     
     @property
     def intervals_per_minute(self) -> float:
         """
-        Количество интервалов в минуту.
-        ИСПРАВЛЕНО: нормализовано по частоте дискретизации!
-        
-        Формула: (num_intervals / total_visible_time) * 60 * (10 / sampling_rate_hz)
-        
-        Для 10Hz: 8 интервалов за 1 час = 0.133/мин
-        Для 1Hz: 8 интервалов за 1 час = 0.133/мин (после нормализации)
+        Возвращает ПИКОВУЮ НОРМАЛИЗОВАННУЮ ЧАСТОТУ.
+        ИСПРАВЛЕНО: если сырых интервалов <= 1, возвращаем 0.0
         """
-        if not self.is_visible or self.total_visible_time == 0:
+        if not self.is_visible:
             return 999.0
         
-        raw_ipm = (self.num_intervals / self.total_visible_time) * 60
+        # Если спутник виден одним непрерывным интервалом - частота 0
+        if len(self.raw_intervals) <= 1:
+            return 0.0
         
-        # НОРМАЛИЗАЦИЯ: приводим к эталонной частоте 10Hz
-        normalized_ipm = raw_ipm * (10.0 / self.sampling_rate_hz)
+        if self.peak_intervals_per_minute_norm > 0:
+            return self.peak_intervals_per_minute_norm
         
-        return normalized_ipm
+        # Fallback
+        raw_ipm = (len(self.raw_intervals) / self.total_visible_time) * 60
+        return raw_ipm * (10.0 / self.sampling_rate_hz)
+    
+    @property
+    def peak_description(self) -> str:
+        """Человекочитаемое описание пиковой нагрузки."""
+        if self.peak_window_count <= 1:
+            return "нет пиковых нагрузок"
+        
+        minutes = self.peak_window_center / 60
+        hours = minutes / 60
+        
+        if hours >= 1:
+            time_str = f"{hours:.1f} ч"
+        else:
+            time_str = f"{minutes:.0f} мин"
+        
+        return (f"пик {self.peak_window_count} инт за 10 мин "
+                f"({self.peak_intervals_per_minute:.2f}/мин) "
+                f"в районе {time_str}")
     
     @property
     def stability_index(self) -> float:
-        """Индекс стабильности от 0 до 1."""
+        """Индекс стабильности от 0 до 1 для RTK."""
         if not self.is_visible:
             return 0.0
-        if self.num_intervals <= 1:
-            return 1.0
+        if len(self.raw_intervals) <= 1:
+            return 1.0  # Только непрерывный трек
         
         ipm = self.intervals_per_minute
         
-        if ipm <= 0.02:   # <1 инт/50 мин
-            return 1.0
-        elif ipm <= 0.05:  # <1 инт/20 мин
-            return 0.9
-        elif ipm <= 0.1:   # <1 инт/10 мин
-            return 0.8
-        elif ipm <= 0.2:   # <1 инт/5 мин
-            return 0.6
-        elif ipm <= 0.5:   # <1 инт/2 мин
-            return 0.4
-        elif ipm <= 1.0:   # ~1 инт/мин
-            return 0.2
+        # ЖЁСТКИЕ КРИТЕРИИ ДЛЯ RTK
+        if ipm == 0.0:
+            return 1.0      # Эталон - непрерывный
+        elif ipm <= 0.01:   # 1 пропадание за 100 мин
+            return 0.8      # Хорошо
+        elif ipm <= 0.02:   # 1 пропадание за 50 мин
+            return 0.6      # Удовлетворительно
+        elif ipm <= 0.05:   # 1 пропадание за 20 мин
+            return 0.3      # Плохо для RTK
         else:
-            return 0.1
+            return 0.1      # Непригодно
     
     @property
     def stability_category(self) -> Tuple[str, str]:
-        """Категория стабильности на основе нормализованных интервалов/минуту."""
+        """Категория стабильности для RTK."""
         if not self.is_visible:
             return ("Не виден", "invisible")
         
         ipm = self.intervals_per_minute
+        raw_count = len(self.raw_intervals)
         
-        if ipm <= 0.02:
+        # ЭТАЛОН - только один непрерывный интервал
+        if raw_count <= 1:
             return ("Эталонный", "excellent")
-        elif ipm <= 0.05:
+        
+        # ЖЁСТКАЯ ГРАДАЦИЯ ДЛЯ RTK
+        if ipm <= 0.01:      # <1 пропадания за 100 мин
             return ("Отличный", "excellent")
-        elif ipm <= 0.1:
+        elif ipm <= 0.02:    # <1 пропадания за 50 мин
             return ("Хороший", "good")
-        elif ipm <= 0.2:
-            return ("Умеренный", "moderate")
-        elif ipm <= 0.5:
-            return ("Нестабильный", "unstable")
-        elif ipm <= 1.0:
+        elif ipm <= 0.05:    # <1 пропадания за 20 мин
+            return ("Удовлетворительный", "moderate")
+        elif ipm <= 0.1:     # <1 пропадания за 10 мин
             return ("Плохой", "bad")
-        else:
-            return ("Критический", "critical")
+        else:                # >1 пропадания за 10 мин
+            return ("Непригодный", "critical")
     
     @property
     def warning_message(self) -> Optional[str]:
-        """Предупреждение для проблемных спутников."""
+        """Предупреждения для RTK."""
         if not self.is_visible:
             return None
         
         ipm = self.intervals_per_minute
-        actual_freq = self.sampling_rate_hz
+        raw_count = len(self.raw_intervals)
         
-        if ipm > 1.0:
-            return f"🚫 КРИТИЧНО: {ipm:.2f} пропаданий/мин (норм. для {actual_freq}Hz)"
-        elif ipm > 0.5:
-            return f"⚠️ ПЛОХО: {ipm:.2f} пропаданий/мин (каждые {60/ipm:.0f} сек)"
-        elif ipm > 0.2:
-            return f"⚠️ НЕСТАБИЛЬНО: {ipm:.2f} пропаданий/мин"
-        elif ipm > 0.1 and self.avg_duration < 60:
-            return f"⚠️ ЗАМЕЧАНИЕ: короткие интервалы ({self.avg_duration:.0f} с)"
+        if raw_count <= 1:
+            return None
+        
+        # РАННИЕ ПРЕДУПРЕЖДЕНИЯ ДЛЯ RTK
+        if ipm > 0.1:
+            return f"🚫 НЕПРИГОДНО: {ipm:.2f}/мин (>{ipm*10:.0f} пропаданий за 10 мин)"
+        elif ipm > 0.05:
+            return f"⚠️ КРИТИЧНО: {ipm:.2f}/мин (1 пропадание за {60/ipm:.0f} мин)"
+        elif ipm > 0.02:
+            return f"⚠️ ПЛОХО: {ipm:.2f}/мин (требуется постобработка)"
+        elif ipm > 0.01:
+            return f"ℹ️ УМЕРЕННО: {ipm:.2f}/мин (возможны сбои)"
         
         return None
     
     @property
     def is_problematic(self) -> bool:
-        """Проблемный ли спутник?"""
+        """Проблемный для RTK >0.02/мин."""
         if not self.is_visible:
             return False
-        ipm = self.intervals_per_minute
-        return ipm > 0.2 or (ipm > 0.1 and self.avg_duration < 30)
+        
+        if len(self.raw_intervals) <= 1:
+            return False
+        
+        # ПОРОГ ПРОБЛЕМНОСТИ ДЛЯ RTK
+        if self.intervals_per_minute > 0.02:
+            return True
+        
+        return False
 
 
 @dataclass
@@ -150,8 +197,8 @@ class GPSConstellationData:
     rows_original: int
     rows_sampled: int
     sampling_rate: int
-    actual_sampling_interval: float  # Реальный интервал между измерениями
-    sampling_rate_hz: float = 10.0  # ИСПРАВЛЕНО: частота в Гц
+    actual_sampling_interval: float
+    sampling_rate_hz: float = 10.0
 
 
 @dataclass
@@ -184,11 +231,14 @@ class GPSConstellationAnalysisResult:
     
     @property
     def overall_quality_score(self) -> float:
-        """Общая оценка качества от 0 до 100."""
+        """Общая оценка качества от 0 до 100 для RTK."""
         if self.visible_satellites == 0:
             return 0.0
         
-        base_score = min(100, (self.mean_satellites / 12) * 100)
+        # Базовый балл от количества спутников
+        base_score = min(100, (self.mean_satellites / 10) * 100)
+        
+        # ШТРАФЫ ЗА НЕСТАБИЛЬНОСТЬ
         penalty = 0
         problem_count = 0
         
@@ -197,14 +247,19 @@ class GPSConstellationAnalysisResult:
                 continue
             
             ipm = stats.intervals_per_minute
-            if ipm > 0.5:
-                penalty += 30
+            
+            # ЖЁСТКИЕ ШТРАФЫ ДЛЯ RTK
+            if ipm > 0.1:
+                penalty += 50  # Непригодно
                 problem_count += 1
-            elif ipm > 0.2:
-                penalty += 20
+            elif ipm > 0.05:
+                penalty += 30  # Критично
                 problem_count += 1
-            elif ipm > 0.1:
-                penalty += 10
+            elif ipm > 0.02:
+                penalty += 20  # Плохо
+                problem_count += 1
+            elif ipm > 0.01:
+                penalty += 10  # Умеренно
                 problem_count += 1
         
         if problem_count > 0:
@@ -212,20 +267,21 @@ class GPSConstellationAnalysisResult:
         
         final_score = max(0, base_score - penalty)
         return round(final_score, 1)
-    
+
     @property
     def overall_quality_category(self) -> Tuple[str, str]:
+        """Категории качества для RTK."""
         score = self.overall_quality_score
-        if score >= 80:
-            return ("Отличное", "#198754")
-        elif score >= 60:
-            return ("Хорошее", "#0d6efd")
-        elif score >= 40:
-            return ("Удовлетворительное", "#fd7e14")
-        elif score >= 20:
-            return ("Плохое", "#dc3545")
+        if score >= 90:
+            return ("Идеально для RTK", "#198754")
+        elif score >= 75:
+            return ("Хорошо для RTK", "#0d6efd")
+        elif score >= 50:
+            return ("Удовлетворительно", "#fd7e14")
+        elif score >= 25:
+            return ("Плохо для RTK", "#dc3545")
         else:
-            return ("Критическое", "#8b0000")
+            return ("Непригодно для RTK", "#8b0000")
     
     @property
     def summary_report(self) -> Dict[str, Any]:
@@ -248,22 +304,23 @@ class GPSConstellationAnalysisResult:
 class GPSConstellationAnalyzer:
     """
     ЧИСТАЯ МОДЕЛЬ - Анализатор GPS созвездия.
-    ОПТИМИЗИРОВАНО для файлов 30+ МБ.
-    ИСПРАВЛЕНО: корректное объединение интервалов, нормализация по частоте.
+    ИСПРАВЛЕНО v3.0:
+    - raw_intervals для расчета частоты
+    - merged_intervals для отображения
+    - Один непрерывный интервал = частота 0.0
     """
     
     ALL_SATELLITES = [f'G{i:02d}' for i in range(1, 33)]
     
     def __init__(self, 
-                 target_points: int = 5000,      # Целевое количество точек после сэмплирования
-                 min_gap_duration: float = 2.0,  # Минимальная длительность ПРОПАДАНИЯ для разделения интервалов (сек)
-                 merge_gap: float = 5.0):        # Объединять интервалы с разрывом МЕНЬШЕ N сек (для близких интервалов)
+                 target_points: int = 5000,
+                 min_gap_duration: float = 10,
+                 merge_gap: float = 10.0):
         """
         Args:
-            target_points: Целевое количество точек (для файлов 30+ МБ)
+            target_points: Целевое количество точек
             min_gap_duration: Минимальная длительность ПРОПАДАНИЯ для разделения интервалов (сек)
-                              Если пропадание короче - интервалы ОБЪЕДИНЯЮТСЯ
-            merge_gap: Объединять интервалы с разрывом МЕНЬШЕ N сек (для уже разделенных интервалов)
+            merge_gap: Объединять интервалы с разрывом МЕНЬШЕ N сек
         """
         self.target_points = target_points
         self.min_gap_duration = min_gap_duration
@@ -282,42 +339,32 @@ class GPSConstellationAnalyzer:
     def parse_file_optimized(self, filepath: str) -> Optional[pd.DataFrame]:
         """
         ОПТИМИЗИРОВАННЫЙ парсер для больших файлов.
-        
-        Стратегия:
-        1. Читаем ТОЛЬКО первые 100 строк для определения структуры
-        2. Определяем реальный интервал дискретизации
-        3. Используем равномерное сэмплирование, а не пропуск строк
-        4. Для 30+ МБ файлов читаем чанками
         """
         filename = os.path.basename(filepath)
         
         try:
-            # ========== 1. Быстрое определение структуры ==========
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 header_line = f.readline().strip()
                 first_data = f.readline().strip()
                 second_data = f.readline().strip()
             
-            # Парсим заголовок
             headers = header_line.split()
             if len(headers) < 3:
                 return None
             
-            # Определяем колонки спутников
             sat_columns = []
-            for h in headers[2:]:
+            for h in headers:
                 if h.startswith('G') and h[1:].isdigit():
                     sat_columns.append(h)
             
             if not sat_columns:
-                sat_columns = self.ALL_SATELLITES
+                sat_columns = self.ALL_SATELLITES.copy()
             
-            # ========== 2. Определяем реальную частоту ==========
             first_parts = first_data.split()
             second_parts = second_data.split()
             
-            actual_interval = 0.1  # По умолчанию 10Hz
-            sampling_rate_hz = 10.0  # По умолчанию
+            actual_interval = 0.1
+            sampling_rate_hz = 10.0
             
             if len(first_parts) >= 1 and len(second_parts) >= 1:
                 try:
@@ -329,18 +376,13 @@ class GPSConstellationAnalyzer:
                 except (ValueError, IndexError):
                     pass
             
-            # ========== 3. ОПТИМИЗИРОВАННОЕ ЧТЕНИЕ ==========
-            
-            # Определяем размер файла
             file_size = os.path.getsize(filepath)
             
-            # Для больших файлов используем построчное чтение с умным сэмплированием
             if file_size > 10 * 1024 * 1024:  # > 10 MB
                 df = self._parse_large_file_chunked(
                     filepath, sat_columns, actual_interval
                 )
             else:
-                # Для маленьких файлов читаем полностью
                 df = self._parse_small_file_full(
                     filepath, sat_columns, actual_interval
                 )
@@ -355,35 +397,37 @@ class GPSConstellationAnalyzer:
             return None
     
     def _parse_large_file_chunked(self, filepath: str, sat_columns: List[str], 
-                                   actual_interval: float) -> Optional[pd.DataFrame]:
-        """
-        Читает большой файл чанками с адаптивным сэмплированием.
-        """
+                                actual_interval: float) -> Optional[pd.DataFrame]:
+        """Читает большой файл чанками с адаптивным сэмплированием."""
         filename = os.path.basename(filepath)
         
         try:
-            # Сначала оцениваем общее количество строк
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                total_lines = sum(1 for _ in f) - 1  # минус заголовок
+                header_line = f.readline().strip()
+                headers = header_line.split()
+                
+                sat_positions = {}
+                for idx, col_name in enumerate(headers):
+                    if col_name.startswith('G') and col_name[1:].isdigit():
+                        sat_positions[idx] = col_name
+                
+                total_lines = sum(1 for _ in f)
             
             if total_lines <= 0:
                 return None
             
-            # Рассчитываем шаг сэмплирования для достижения target_points
             step = max(1, total_lines // self.target_points)
             
             data_rows = []
             time_values = []
             
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                # Пропускаем заголовок
                 f.readline()
                 
                 line_count = 0
                 for line in f:
                     line_count += 1
                     
-                    # Равномерное сэмплирование
                     if line_count % step != 0:
                         continue
                     
@@ -401,25 +445,20 @@ class GPSConstellationAnalyzer:
                         
                         row = {'DayTime': time_val, 'DateTime': parts[1]}
                         
-                        # Читаем значения спутников
-                        sat_idx = 0
-                        for i in range(2, min(len(parts), len(sat_columns) + 2)):
-                            sat_name = sat_columns[sat_idx] if sat_idx < len(sat_columns) else f"G{i-1:02d}"
-                            try:
-                                val = int(float(parts[i]))
-                                row[sat_name] = val
-                            except (ValueError, IndexError):
-                                row[sat_name] = 0
-                            sat_idx += 1
-                        
-                        # Заполняем отсутствующие спутники нулями
                         for sat in self.ALL_SATELLITES:
-                            if sat not in row:
-                                row[sat] = 0
+                            row[sat] = 0
+                        
+                        for pos, sat_name in sat_positions.items():
+                            if pos < len(parts):
+                                try:
+                                    val = int(float(parts[pos]))
+                                    row[sat_name] = val
+                                except (ValueError, IndexError):
+                                    row[sat_name] = 0
                         
                         data_rows.append(row)
                         
-                    except (ValueError, IndexError) as e:
+                    except (ValueError, IndexError):
                         continue
             
             if not data_rows:
@@ -427,7 +466,6 @@ class GPSConstellationAnalyzer:
             
             df = pd.DataFrame(data_rows)
             
-            # Сохраняем информацию о реальном интервале
             df.attrs['actual_interval'] = actual_interval
             df.attrs['step'] = step
             df.attrs['total_lines'] = total_lines
@@ -444,7 +482,10 @@ class GPSConstellationAnalyzer:
         filename = os.path.basename(filepath)
         
         try:
-            # Используем pandas для быстрого чтения
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                header_line = f.readline().strip()
+                headers = header_line.split()
+            
             df = pd.read_csv(
                 filepath,
                 sep='\s+',
@@ -456,19 +497,18 @@ class GPSConstellationAnalyzer:
             if len(df) < 2:
                 return None
             
-            # Переименовываем колонки если нужно
-            column_map = {}
+            actual_sat_columns = []
             for col in df.columns:
                 if col.startswith('G') and col[1:].isdigit():
-                    column_map[col] = col
-                elif col not in ['DayTime', 'DateTime']:
-                    # Пытаемся определить спутник по позиции
-                    pass
+                    actual_sat_columns.append(col)
             
-            # Добавляем отсутствующие спутники
             for sat in self.ALL_SATELLITES:
                 if sat not in df.columns:
                     df[sat] = 0
+            
+            columns_order = ['DayTime', 'DateTime'] + self.ALL_SATELLITES
+            existing_columns = [col for col in columns_order if col in df.columns]
+            df = df[existing_columns]
             
             df.attrs['actual_interval'] = actual_interval
             return df
@@ -478,19 +518,14 @@ class GPSConstellationAnalyzer:
             return None
     
     def detect_gaps(self, visibility: np.ndarray, time_seconds: np.ndarray) -> List[SatelliteInterval]:
-        """
-        Детектирует интервалы видимости спутника.
-        Возвращает ВСЕ интервалы, даже микроскопические.
-        """
+        """Детектирует ВСЕ интервалы видимости спутника (сырые)."""
         if not np.any(visibility):
             return []
         
-        # Находим перепады сигнала
         diff = np.diff(visibility.astype(int))
         starts = np.where(diff == 1)[0] + 1
         ends = np.where(diff == -1)[0] + 1
         
-        # Обрабатываем граничные случаи
         if visibility[0]:
             starts = np.insert(starts, 0, 0)
         if visibility[-1]:
@@ -498,8 +533,6 @@ class GPSConstellationAnalyzer:
         
         intervals = []
         for start_idx, end_idx in zip(starts, ends):
-            # Индекс конца интервала: берем последний элемент или предпоследний?
-            # Для массива индексов 0..N-1, интервал занимает позиции start_idx .. end_idx-1
             end_time_idx = min(end_idx - 1, len(time_seconds) - 1)
             start_time = time_seconds[start_idx]
             end_time = time_seconds[end_time_idx]
@@ -515,32 +548,19 @@ class GPSConstellationAnalyzer:
     
     def merge_intervals_by_gap(self, intervals: List[SatelliteInterval], gap_threshold: float) -> List[SatelliteInterval]:
         """
-        ОБЪЕДИНЯЕТ интервалы, если РАЗРЫВ между ними МЕНЬШЕ порога.
-        
-        Это КЛЮЧЕВОЙ МЕТОД для фильтрации коротких пропаданий.
-        Если спутник пропал на 0.1 секунды и сразу появился - 
-        это должно быть ОДНИМ ИНТЕРВАЛОМ, а не двумя.
-        
-        Args:
-            intervals: Список интервалов видимости
-            gap_threshold: Максимальная длительность пропадания для объединения (сек)
-        
-        Returns:
-            Объединенный список интервалов
+        Объединяет интервалы, если РАЗРЫВ между ними МЕНЬШЕ порога.
+        Используется для объединения микро-пропаданий.
         """
         if not intervals:
             return []
         
-        # Сортируем по времени начала
         sorted_int = sorted(intervals, key=lambda x: x.start)
         merged = []
         current = sorted_int[0]
         
         for interval in sorted_int[1:]:
-            # Вычисляем разрыв между текущим интервалом и следующим
             gap = interval.start - current.end
             
-            # Если разрыв МЕНЬШЕ порога - объединяем интервалы
             if gap <= gap_threshold:
                 current = SatelliteInterval(
                     start=current.start,
@@ -548,7 +568,6 @@ class GPSConstellationAnalyzer:
                     duration=max(current.end, interval.end) - current.start
                 )
             else:
-                # Разрыв слишком большой - сохраняем текущий и начинаем новый
                 merged.append(current)
                 current = interval
         
@@ -556,11 +575,7 @@ class GPSConstellationAnalyzer:
         return merged
     
     def merge_close_intervals(self, intervals: List[SatelliteInterval]) -> List[SatelliteInterval]:
-        """
-        Объединяет БЛИЗКО РАСПОЛОЖЕННЫЕ интервалы (использует self.merge_gap).
-        Это дополнительная фильтрация для случаев, когда интервалы разделены,
-        но находятся очень близко по времени.
-        """
+        """Объединяет близко расположенные интервалы."""
         return self.merge_intervals_by_gap(intervals, self.merge_gap)
     
     def calculate_satellite_stats(self, intervals: List[SatelliteInterval],
@@ -571,7 +586,8 @@ class GPSConstellationAnalyzer:
             prn=prn,
             num_intervals=len(intervals),
             intervals=intervals,
-            sampling_rate_hz=sampling_rate_hz  # ИСПРАВЛЕНО: передаем реальную частоту
+            raw_intervals=[],  # будет заполнено отдельно
+            sampling_rate_hz=sampling_rate_hz
         )
         
         if not intervals:
@@ -591,80 +607,159 @@ class GPSConstellationAnalyzer:
         """
         Анализирует один SVs файл.
         
-        ИСПРАВЛЕНО:
-        1. Сначала детектируем ВСЕ интервалы
-        2. ОБЪЕДИНЯЕМ интервалы при коротких пропаданиях (< min_gap_duration)
-        3. Затем объединяем близкие интервалы (merge_gap)
-        4. Нормализуем метрики по частоте дискретизации
+        ИСПРАВЛЕНО v3.0:
+        1. Детекция ВСЕХ интервалов видимости (raw_intervals)
+        2. Объединение микро-пропаданий (merged_intervals) для отображения
+        3. Расчет пиковой частоты по raw_intervals
+        4. Если raw_intervals <= 1 → частота = 0.0
         """
         filename = os.path.basename(filepath)
         
+        # ------------------------------------------------------------
+        # ШАГ 1: ПАРСИНГ ФАЙЛА
+        # ------------------------------------------------------------
         df = self.parse_file_optimized(filepath)
         if df is None or len(df) < 2:
+            self._results.pop(filename, None)
             return None
         
+        # ------------------------------------------------------------
+        # ШАГ 2: ИЗВЛЕЧЕНИЕ ВРЕМЕННЫХ РЯДОВ
+        # ------------------------------------------------------------
         time_seconds = df['DayTime'].values
         total_duration = time_seconds[-1] - time_seconds[0]
         
-        # Получаем реальный интервал дискретизации и частоту
         actual_interval = df.attrs.get('actual_interval', 0.1)
-        sampling_rate_hz = df.attrs.get('sampling_rate_hz', 1.0 / actual_interval if actual_interval > 0 else 10.0)
+        if actual_interval <= 0:
+            actual_interval = 0.1
         
+        sampling_rate_hz = 1.0 / actual_interval
+        sampling_rate_hz = min(max(sampling_rate_hz, 0.1), 100.0)
+        
+        # ------------------------------------------------------------
+        # ШАГ 3: АНАЛИЗ КАЖДОГО СПУТНИКА
+        # ------------------------------------------------------------
         satellite_stats = {}
         visible_count = 0
-        total_sat_seconds = 0
+        total_sat_seconds = 0.0
         
         for sat in self.ALL_SATELLITES:
+            # ---------- 3.1 Проверка наличия колонки ----------
             if sat not in df.columns:
                 satellite_stats[sat] = SatelliteStatistics(
                     prn=sat,
-                    sampling_rate_hz=sampling_rate_hz
+                    sampling_rate_hz=sampling_rate_hz,
+                    is_visible=False
                 )
                 continue
             
+            # ---------- 3.2 Маска видимости ----------
             visibility = df[sat].values > 0
             
-            # ============ ИСПРАВЛЕННАЯ ЛОГИКА ============
+            if not np.any(visibility):
+                satellite_stats[sat] = SatelliteStatistics(
+                    prn=sat,
+                    sampling_rate_hz=sampling_rate_hz,
+                    is_visible=False
+                )
+                continue
             
-            # Шаг 1: Детектируем ВСЕ интервалы видимости (даже микроскопические)
-            intervals = self.detect_gaps(visibility, time_seconds)
+            # ========== 3.3 ИСПРАВЛЕНИЕ: ДВА ТИПА ИНТЕРВАЛОВ ==========
+            # СЫРЫЕ интервалы - для расчета частоты
+            raw_intervals = self.detect_gaps(visibility, time_seconds)
             
-            # Шаг 2: Объединяем интервалы, если пропадание было короче min_gap_duration
-            # Это фильтрует микро-пропадания (0.1-1.9 сек на 10Hz данных)
-            intervals = self.merge_intervals_by_gap(intervals, self.min_gap_duration)
+            # ОБЪЕДИНЕННЫЕ интервалы - для отображения на графике
+            merged_intervals = self.merge_intervals_by_gap(raw_intervals, self.min_gap_duration)
+            final_intervals = self.merge_close_intervals(merged_intervals)
             
-            # Шаг 3: Дополнительно объединяем очень близкие интервалы
-            # (использует merge_gap, который обычно больше min_gap_duration)
-            intervals = self.merge_close_intervals(intervals)
-            
-            # =============================================
-            
-            # Рассчитываем статистику с учетом частоты дискретизации
-            stats = self.calculate_satellite_stats(
-                intervals, total_duration, sat, sampling_rate_hz
+            # ---------- 3.4 Базовая статистика ----------
+            stats = self._calculate_basic_stats(
+                final_intervals, 
+                total_duration, 
+                sat, 
+                sampling_rate_hz
             )
+            
+            # ---------- 3.5 Сохраняем СЫРЫЕ интервалы ----------
+            stats.raw_intervals = raw_intervals
+            
+            # ========== 3.6 ИСПРАВЛЕННЫЙ РАСЧЕТ ПИКОВОЙ ЧАСТОТЫ ==========
+            # Используем raw_intervals, а не final_intervals!
+            if raw_intervals and len(raw_intervals) > 1:  # Только если есть микро-интервалы
+                start_times = []
+                for interval in raw_intervals:
+                    if hasattr(interval, 'get'):
+                        start_times.append(interval.get('start', 0))
+                    else:
+                        start_times.append(interval.start)
+                
+                start_times = np.array(sorted(start_times))
+                
+                # Скользящее окно 10 минут (600 секунд)
+                WINDOW_SECONDS = 600
+                WINDOW_MINUTES = 10.0
+                
+                max_intervals_in_window = 0
+                optimal_window_center = start_times[0]
+                
+                for center_time in start_times:
+                    window_start = center_time - WINDOW_SECONDS/2
+                    window_end = center_time + WINDOW_SECONDS/2
+                    
+                    count = np.sum(
+                        (start_times >= window_start) & 
+                        (start_times <= window_end)
+                    )
+                    
+                    if count > max_intervals_in_window:
+                        max_intervals_in_window = count
+                        optimal_window_center = center_time
+                
+                # Пересчет в интервалы/минуту
+                peak_raw_ipm = max_intervals_in_window / WINDOW_MINUTES
+                peak_normalized_ipm = peak_raw_ipm * (10.0 / sampling_rate_hz)
+                
+                stats.peak_intervals_per_minute = peak_raw_ipm
+                stats.peak_intervals_per_minute_norm = peak_normalized_ipm
+                stats.peak_window_center = optimal_window_center
+                stats.peak_window_start = optimal_window_center - WINDOW_SECONDS/2
+                stats.peak_window_end = optimal_window_center + WINDOW_SECONDS/2
+                stats.peak_window_count = max_intervals_in_window
+            else:
+                # Один непрерывный интервал или нет интервалов
+                stats.peak_intervals_per_minute = 0.0
+                stats.peak_intervals_per_minute_norm = 0.0
+                stats.peak_window_center = 0.0
+                stats.peak_window_count = 1 if raw_intervals else 0
+            
+            # ---------- 3.7 Сохраняем статистику ----------
             satellite_stats[sat] = stats
             
             if stats.is_visible:
                 visible_count += 1
                 total_sat_seconds += stats.total_visible_time
         
+        # ------------------------------------------------------------
+        # ШАГ 4: ОБЩАЯ СТАТИСТИКА ПО ФАЙЛУ
+        # ------------------------------------------------------------
         mean_satellites = total_sat_seconds / total_duration if total_duration > 0 else 0
         
-        # Информация о данных
         step = df.attrs.get('step', 1)
         total_lines = df.attrs.get('total_lines', len(df) * step)
         
+        # ------------------------------------------------------------
+        # ШАГ 5: ФОРМИРОВАНИЕ РЕЗУЛЬТАТА
+        # ------------------------------------------------------------
         data = GPSConstellationData(
             filename=filename,
             filepath=filepath,
-            time_range=(time_seconds[0], time_seconds[-1]),
-            total_duration=total_duration,
-            rows_original=total_lines,
+            time_range=(float(time_seconds[0]), float(time_seconds[-1])),
+            total_duration=float(total_duration),
+            rows_original=int(total_lines),
             rows_sampled=len(df),
             sampling_rate=step,
-            actual_sampling_interval=actual_interval,
-            sampling_rate_hz=sampling_rate_hz
+            actual_sampling_interval=float(actual_interval),
+            sampling_rate_hz=float(sampling_rate_hz)
         )
         
         result = GPSConstellationAnalysisResult(
@@ -673,11 +768,37 @@ class GPSConstellationAnalyzer:
             data=data,
             satellite_stats=satellite_stats,
             visible_satellites=visible_count,
-            mean_satellites=mean_satellites
+            mean_satellites=mean_satellites,
+            timestamp=datetime.now(),
+            success=True
         )
         
         self._results[filename] = result
         return result
+    
+    def _calculate_basic_stats(self, intervals: List[SatelliteInterval], 
+                            total_duration: float, prn: str,
+                            sampling_rate_hz: float) -> SatelliteStatistics:
+        """Рассчитывает базовую статистику (без пиковой частоты)."""
+        stats = SatelliteStatistics(
+            prn=prn,
+            num_intervals=len(intervals),
+            intervals=intervals,
+            sampling_rate_hz=sampling_rate_hz
+        )
+        
+        if not intervals:
+            return stats
+        
+        durations = [i.duration for i in intervals]
+        stats.total_visible_time = sum(durations)
+        stats.avg_duration = float(np.mean(durations)) if durations else 0.0
+        stats.max_duration = float(max(durations)) if durations else 0.0
+        stats.min_duration = float(min(durations)) if durations else 0.0
+        stats.visibility_percent = (stats.total_visible_time / total_duration * 100) if total_duration > 0 else 0.0
+        stats.is_visible = stats.total_visible_time > 0
+        
+        return stats
     
     def analyze_all(self, results_dir: str) -> Dict[str, GPSConstellationAnalysisResult]:
         """Анализирует все SVs файлы в директории."""
@@ -735,7 +856,6 @@ class GPSConstellationAnalyzer:
                     'Excellent_Satellites': len(result.excellent_satellites),
                 }
                 
-                # Топ-5 проблемных спутников (по частоте!)
                 problematic = sorted(
                     result.problem_satellites,
                     key=lambda x: x[1].intervals_per_minute,
@@ -744,7 +864,7 @@ class GPSConstellationAnalyzer:
                 
                 for i, (sat, stats) in enumerate(problematic, 1):
                     row[f'Problem{i}_Satellite'] = sat
-                    row[f'Problem{i}_Intervals'] = stats.num_intervals
+                    row[f'Problem{i}_Intervals'] = len(stats.raw_intervals)  # сырые интервалы
                     row[f'Problem{i}_AvgDuration'] = round(stats.avg_duration, 1)
                     row[f'Problem{i}_Visibility_%'] = round(stats.visibility_percent, 1)
                     row[f'Problem{i}_IntervalsPerMinute'] = round(stats.intervals_per_minute, 3)
