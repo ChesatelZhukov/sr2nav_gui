@@ -16,7 +16,7 @@ from view.themes import Theme
 from view.widgets import ModernButton
 
 # Импортируем UIPersistence для сохранения последней папки
-from view.main_window import UIPersistence
+from view.persistence import UIPersistence  # НОВЫЙ ИМПОРТ
 
 
 class GPSExclusionDialog:

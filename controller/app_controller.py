@@ -585,27 +585,21 @@ class ApplicationController:
         GPSAnalysisWindow(self._window.window, self)
     
     def request_gps_analysis(self, window: GPSAnalysisWindow) -> None:
-        """
-        Обработка запроса от окна анализа GPS созвездия.
-        ИСПРАВЛЕНО: корректная обработка ошибок и скрытие индикатора загрузки.
-        """
         async def _run():
             try:
-                # 1. Анализ данных (Model)
                 results = self._gps_analyzer.analyze_all(str(APP_CONTEXT.results_dir))
+                # Проверка на пустой результат
+                if not results:
+                    self._window.window.after(0, lambda: window.show_error("Анализатор не вернул данных. Файлы .SVs не найдены или пусты."))
+                    return
                 
-                # 2. Преобразование данных для View
                 view_results = self._prepare_gps_results_for_view(results)
-                
-                # 3. Обновление View (в главном потоке Tkinter)
                 self._window.window.after(0, lambda: window.update_results(view_results))
                 
             except Exception as e:
-                # 4. КРИТИЧЕСКИ ВАЖНО: скрываем загрузку и показываем ошибку
                 error_msg = f"Ошибка анализа GPS созвездия: {str(e)}"
                 self._publish_message(AppMessage.error(error_msg, source="Controller"))
-                
-                # Передаём ошибку в окно
+                # ВАЖНО: передаем управление в окно, чтобы оно скрыло загрузку и показало ошибку
                 self._window.window.after(0, lambda: window.show_error(error_msg))
         
         self._run_async(_run())

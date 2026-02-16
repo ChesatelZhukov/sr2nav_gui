@@ -8,7 +8,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Callable
 from datetime import datetime
 import os
 import sys
@@ -20,31 +20,7 @@ from view.widgets import (
     FileEntryWidget,
     CollapsibleFrame,
 )
-
-
-class UIPersistence:
-    """
-    Хранит состояние интерфейса между вызовами диалогов.
-    ТОЛЬКО ДЛЯ UI - никакой бизнес-логики!
-    """
-    _last_browse_dir: str = ""
-    
-    @classmethod
-    def get_last_dir(cls) -> str:
-        """Возвращает последнюю использованную папку."""
-        return cls._last_browse_dir
-    
-    @classmethod
-    def set_last_dir(cls, path: str) -> None:
-        """Сохраняет последнюю использованную папку."""
-        if path and os.path.exists(os.path.dirname(path)):
-            cls._last_browse_dir = os.path.dirname(path)
-    
-    @classmethod
-    def update_from_path(cls, path: str) -> None:
-        """Обновляет последнюю папку из выбранного файла."""
-        if path and os.path.exists(path):
-            cls._last_browse_dir = os.path.dirname(path)
+from view.persistence import UIPersistence  # ИСПРАВЛЕНО: вынесли в отдельный модуль
 
 
 class MainWindow:
@@ -61,9 +37,16 @@ class MainWindow:
     """
     
     def __init__(self, controller):
-        self._controller = controller
-        self._root: Optional[tk.Tk] = None
+        """
+        Инициализация главного окна.
         
+        Args:
+            controller: Контроллер приложения для обработки событий
+        """
+        self._controller = controller
+        
+        # UI элементы
+        self._root: Optional[tk.Tk] = None
         self._file_widgets: Dict[str, FileEntryWidget] = {}
         self._entry_start: Optional[tk.Entry] = None
         self._entry_end: Optional[tk.Entry] = None
@@ -72,7 +55,9 @@ class MainWindow:
         self._progress_bar: Optional[ttk.Progressbar] = None
         self._status_var: Optional[tk.StringVar] = None
         self._output_text: Optional[tk.Text] = None
+        self._interval_mode_label: Optional[tk.Label] = None
         
+        # Конфигурация тегов для подсветки текста
         self._TAGS = {
             'debug': Theme.DEBUG,
             'info': Theme.INFO,
@@ -82,7 +67,7 @@ class MainWindow:
             'header': Theme.ACCENT_BLUE,
         }
     
-    # ==================== ЗАПУСК ====================
+    # ==================== ПУБЛИЧНЫЙ API ====================
     
     def run(self) -> None:
         """Запуск главного окна."""
@@ -93,10 +78,113 @@ class MainWindow:
         self._auto_fill_standard_files()
         
         self._poll_message_queue()
-        
         self._root.mainloop()
     
-    # ==================== СОЗДАНИЕ ИНТЕРФЕЙСА ====================
+    def quit_application(self) -> None:
+        """Корректное завершение приложения (вызывается из контроллера)."""
+        if self._root:
+            self._root.quit()
+    
+    # ==================== МЕТОДЫ ДЛЯ КОНТРОЛЛЕРА ====================
+    
+    def get_all_file_paths(self) -> Dict[str, str]:
+        """Возвращает словарь {тип_файла: путь} из UI."""
+        paths = {}
+        for key, widget in self._file_widgets.items():
+            value = widget.get_value()
+            if value:
+                paths[key] = value
+        return paths
+    
+    def get_sr2nav_path(self) -> str:
+        """Возвращает путь к SR2Nav.exe."""
+        widget = self._file_widgets.get('sr2nav')
+        return widget.get_value() if widget else ""
+    
+    def get_rover_path(self) -> str:
+        """Возвращает путь к файлу ровера."""
+        widget = self._file_widgets.get('rover')
+        return widget.get_value() if widget else ""
+    
+    def sync_file_paths(self, paths: Dict[str, str]) -> None:
+        """Синхронизирует пути из бэкенда в UI."""
+        for key, path in paths.items():
+            if key in self._file_widgets and path:
+                current = self._file_widgets[key].get_value()
+                if current != path:
+                    self._file_widgets[key].set_value(path)
+    
+    def set_file_path(self, key: str, path: str) -> None:
+        """Устанавливает путь в конкретный виджет."""
+        if key in self._file_widgets and path:
+            self._file_widgets[key].set_value(path)
+    
+    def get_cutoff_angle(self) -> float:
+        """Возвращает угол отсечения."""
+        try:
+            return float(self._entry_angle.get()) if self._entry_angle else 7.0
+        except (ValueError, AttributeError):
+            return 7.0
+    
+    def update_time_interval(self, start: str, end: str, is_manual: bool = False) -> None:
+        """Обновляет поля временного интервала."""
+        if self._entry_start:
+            self._entry_start.delete(0, tk.END)
+            self._entry_start.insert(0, start)
+        if self._entry_end:
+            self._entry_end.delete(0, tk.END)
+            self._entry_end.insert(0, end)
+        
+        if self._interval_mode_label:
+            if is_manual:
+                self._interval_mode_label.config(
+                    text="✏️ ручной",
+                    fg=Theme.ACCENT_ORANGE
+                )
+                self._append_output(f"⏱ Интервал (ручной): {start} - {end}", "info")
+            else:
+                self._interval_mode_label.config(
+                    text="⚡ авто",
+                    fg=Theme.FG_SECONDARY
+                )
+                self._append_output(f"⏱ Интервал (авто): {start} - {end}", "info")
+    
+    def set_processing_state(self, is_processing: bool) -> None:
+        """Устанавливает состояние обработки (индикация)."""
+        if is_processing:
+            self._status_var.set("⏳ Выполнение операции...")
+            self._progress_bar.start(10)
+            if self._btn_terminate:
+                self._btn_terminate.config(state="normal")
+        else:
+            self._status_var.set("✅ Готов к работе")
+            self._progress_bar.stop()
+            if self._btn_terminate:
+                self._btn_terminate.config(state="disabled")
+    
+    def set_status(self, message: str, is_warning: bool = False):
+        """Устанавливает текст статуса."""
+        if self._status_var:
+            self._status_var.set(message)
+    
+    def clear_output(self) -> None:
+        """Очищает консоль вывода."""
+        if self._output_text:
+            self._output_text.delete(1.0, tk.END)
+            self._print_welcome()
+            self.set_status("🧹 Вывод очищен")
+            self._root.after(2000, lambda: self.set_status("✅ Готов к работе"))
+    
+    def show_error(self, title: str, message: str):
+        """Показывает сообщение об ошибке (для контроллера)."""
+        messagebox.showerror(title, message, parent=self._root)
+    
+    @property
+    def window(self) -> tk.Tk:
+        """Возвращает корневое окно Tkinter."""
+        return self._root
+    
+    # ==================== ПРИВАТНЫЕ МЕТОДЫ СОЗДАНИЯ UI ====================
     
     def _create_window(self) -> None:
         """Создание главного окна."""
@@ -106,20 +194,22 @@ class MainWindow:
         self._root.minsize(1400, 850)
         self._root.configure(bg=Theme.BG_PRIMARY)
         
+        self._center_window()
+        self._root.protocol("WM_DELETE_WINDOW", self._on_closing)
+    
+    def _center_window(self) -> None:
+        """Центрирование окна на экране."""
         self._root.update_idletasks()
         width = self._root.winfo_width()
         height = self._root.winfo_height()
         x = (self._root.winfo_screenwidth() // 2) - (width // 2)
         y = (self._root.winfo_screenheight() // 2) - (height // 2)
         self._root.geometry(f'{width}x{height}+{x}+{y}')
-
-        # Только вызов контроллера!
-        self._root.protocol("WM_DELETE_WINDOW", self._on_closing)
-
+    
     def _on_closing(self):
         """Закрытие окна - передаём управление контроллеру."""
         self._controller.on_app_closing()
-
+    
     def _setup_styles(self) -> None:
         """Настройка стилей ttk."""
         style = ttk.Style()
@@ -130,7 +220,7 @@ class MainWindow:
             troughcolor=Theme.BORDER,
             bordercolor=Theme.BORDER,
         )
-
+    
     def _create_menu(self) -> None:
         """Создание меню приложения."""
         menubar = tk.Menu(self._root)
@@ -141,7 +231,7 @@ class MainWindow:
         menubar.add_cascade(label="📁 Файл", menu=file_menu)
         file_menu.add_command(label="📂 Открыть рабочий каталог", command=self._on_open_working_dir)
         file_menu.add_separator()
-        file_menu.add_command(label="🚪 Выход", command=self._root.quit)
+        file_menu.add_command(label="🚪 Выход", command=self._on_exit)
         
         # Анализ
         analysis_menu = tk.Menu(menubar, tearoff=0)
@@ -177,6 +267,10 @@ class MainWindow:
         menubar.add_cascade(label="❓ Справка", menu=help_menu)
         help_menu.add_command(label="ℹ️ О программе", command=self._on_about)
     
+    def _on_exit(self):
+        """Обработчик выхода из меню."""
+        self._on_closing()
+    
     def _create_widgets(self) -> None:
         """Создание виджетов главного окна."""
         main = tk.Frame(self._root, bg=Theme.BG_PRIMARY)
@@ -207,7 +301,12 @@ class MainWindow:
         frame.pack(fill=tk.X)
         frame.pack_propagate(False)
         
-        title_frame = tk.Frame(frame, bg=Theme.BG_SECONDARY)
+        self._create_title_section(frame)
+        self._create_action_buttons(frame)
+    
+    def _create_title_section(self, parent) -> None:
+        """Создает секцию с заголовком."""
+        title_frame = tk.Frame(parent, bg=Theme.BG_SECONDARY)
         title_frame.pack(side=tk.LEFT, padx=20)
         
         tk.Label(
@@ -225,8 +324,10 @@ class MainWindow:
             bg=Theme.BG_SECONDARY,
             fg=Theme.FG_SECONDARY,
         ).pack(anchor="w")
-        
-        btn_frame = tk.Frame(frame, bg=Theme.BG_SECONDARY)
+    
+    def _create_action_buttons(self, parent) -> None:
+        """Создает кнопки действий."""
+        btn_frame = tk.Frame(parent, bg=Theme.BG_SECONDARY)
         btn_frame.pack(side=tk.RIGHT, padx=20)
         
         self._btn_terminate = ModernButton(
@@ -304,7 +405,7 @@ class MainWindow:
                 open_callback=self._controller.on_open_file,
                 stitch_callback=self._on_stitch_files if can_stitch else None,
                 expected_extension=ext,
-                file_key=key,  # ИСПРАВЛЕНО: передаем ключ для обратной связи
+                file_key=key,
             )
             widget.pack(fill=tk.X, pady=3)
             self._file_widgets[key] = widget
@@ -317,8 +418,12 @@ class MainWindow:
         content = tk.Frame(frame.content, bg=Theme.BG_PRIMARY)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         
-        # Временной интервал
-        time_frame = tk.Frame(content, bg=Theme.BG_PRIMARY)
+        self._create_time_interval_section(content)
+        self._create_angle_section(content)
+    
+    def _create_time_interval_section(self, parent):
+        """Создает секцию временного интервала."""
+        time_frame = tk.Frame(parent, bg=Theme.BG_PRIMARY)
         time_frame.pack(fill=tk.X, pady=8)
         
         tk.Label(
@@ -379,10 +484,11 @@ class MainWindow:
         )
         self._interval_mode_label.pack(side=tk.LEFT, padx=(10, 0))
         
-        tk.Frame(content, height=1, bg=Theme.BORDER).pack(fill=tk.X, pady=12)
-        
-        # Угол отсечения
-        angle_frame = tk.Frame(content, bg=Theme.BG_PRIMARY)
+        tk.Frame(parent, height=1, bg=Theme.BORDER).pack(fill=tk.X, pady=12)
+    
+    def _create_angle_section(self, parent):
+        """Создает секцию угла отсечения."""
+        angle_frame = tk.Frame(parent, bg=Theme.BG_PRIMARY)
         angle_frame.pack(fill=tk.X, pady=8)
         
         tk.Label(
@@ -425,33 +531,19 @@ class MainWindow:
             padx=16,
             pady=6,
         ).pack(side=tk.LEFT)
-
-    def _on_interval_changed(self, event=None):
-        """Вызывается при изменении полей интервала пользователем."""
-        if not self._entry_start or not self._entry_end:
-            return
-        
-        start = self._entry_start.get().strip()
-        end = self._entry_end.get().strip()
-        
-        if start and end:
-            self._controller.on_interval_manually_changed(start, end)
-            self._interval_mode_label.config(
-                text="✏️ ручной",
-                fg=Theme.ACCENT_ORANGE
-            )
-        else:
-            self._interval_mode_label.config(
-                text="⚡ авто",
-                fg=Theme.FG_SECONDARY
-            )
-
+    
     def _create_output_panel(self, parent) -> None:
         """Панель вывода сообщений."""
         frame = tk.Frame(parent, bg=Theme.BG_SECONDARY, bd=1, relief=tk.SOLID)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        header = tk.Frame(frame, bg=Theme.BG_SECONDARY)
+        self._create_output_header(frame)
+        self._create_output_text_area(frame)
+        self._print_welcome()
+    
+    def _create_output_header(self, parent):
+        """Создает заголовок панели вывода."""
+        header = tk.Frame(parent, bg=Theme.BG_SECONDARY)
         header.pack(fill=tk.X, padx=12, pady=8)
         
         tk.Label(
@@ -479,9 +571,11 @@ class MainWindow:
             pady=4,
             font=("Segoe UI", 10),
         ).pack(side=tk.RIGHT, padx=2)
-        
+    
+    def _create_output_text_area(self, parent):
+        """Создает текстовую область для вывода."""
         self._output_text = tk.Text(
-            frame,
+            parent,
             wrap=tk.WORD,
             font=("Consolas", 11),
             bg="white",
@@ -491,20 +585,20 @@ class MainWindow:
             pady=12,
         )
         
-        scrollbar = tk.Scrollbar(frame, command=self._output_text.yview)
+        scrollbar = tk.Scrollbar(parent, command=self._output_text.yview)
         self._output_text.configure(yscrollcommand=scrollbar.set)
         
         self._output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self._output_text.tag_config("debug", foreground=Theme.DEBUG)
-        self._output_text.tag_config("info", foreground=Theme.INFO)
-        self._output_text.tag_config("warning", foreground=Theme.WARNING)
-        self._output_text.tag_config("error", foreground=Theme.ERROR, font=("Consolas", 11, "bold"))
-        self._output_text.tag_config("success", foreground=Theme.SUCCESS)
-        self._output_text.tag_config("header", foreground=Theme.ACCENT_BLUE, font=("Consolas", 11, "bold"))
-        
-        self._print_welcome()
+        # Настройка тегов для подсветки
+        for tag_name, color in self._TAGS.items():
+            if tag_name == 'error':
+                self._output_text.tag_config(tag_name, foreground=color, font=("Consolas", 11, "bold"))
+            elif tag_name == 'header':
+                self._output_text.tag_config(tag_name, foreground=color, font=("Consolas", 11, "bold"))
+            else:
+                self._output_text.tag_config(tag_name, foreground=color)
     
     def _create_status_panel(self, parent) -> None:
         """Нижняя панель статуса."""
@@ -531,7 +625,6 @@ class MainWindow:
         ).pack(side=tk.RIGHT, padx=20)
     
     # ==================== ОБРАБОТЧИКИ СОБЫТИЙ UI ====================
-    # ТОЛЬКО ВЫЗОВ КОНТРОЛЛЕРА, НИКАКИХ ПРОВЕРОК!
     
     def _on_browse_file(self, key: str, extension: str) -> str:
         """Открывает диалог выбора файла и ВОЗВРАЩАЕТ путь."""
@@ -552,17 +645,9 @@ class MainWindow:
         return path or ""
     
     def _on_stitch_files(self, source_key: str = "rover") -> None:
-        """
-        Обработчик сшивания JPS файлов.
-        
-        Args:
-            source_key: Ключ файла, из которого вызвано сшивание
-                        (по умолчанию rover, может быть base1, base2)
-        """
-        # ИСПРАВЛЕНО: запоминаем, откуда вызвали сшивку
+        """Обработчик сшивания JPS файлов."""
         self._current_stitch_target = source_key
         
-        # Определяем начальную папку
         initial_dir = UIPersistence.get_last_dir()
         if not initial_dir:
             initial_dir = self._controller.script_dir
@@ -581,7 +666,6 @@ class MainWindow:
             )
             return
         
-        # Сохраняем папку первого выбранного файла
         UIPersistence.set_last_dir(input_files[0])
         
         output_file = filedialog.asksaveasfilename(
@@ -594,12 +678,10 @@ class MainWindow:
         
         if output_file:
             UIPersistence.set_last_dir(output_file)
-            
-            # ИСПРАВЛЕНО: передаем target_key в контроллер
             self._controller.on_stitch_jps(
                 list(input_files), 
                 output_file,
-                target_key=source_key  # новый параметр
+                target_key=source_key
             )
     
     def _on_open_working_dir(self) -> None:
@@ -607,7 +689,7 @@ class MainWindow:
         path = self._controller.script_dir
         
         if not os.path.exists(path):
-            self._show_error("Ошибка", f"Папка не найдена:\n{path}")
+            self.show_error("Ошибка", f"Папка не найдена:\n{path}")
             return
         
         try:
@@ -628,7 +710,7 @@ class MainWindow:
         dialog = TransformFileDialog(
             self._root,
             str(APP_CONTEXT.results_dir),
-            self._controller.on_transform_files,  # Прямой вызов контроллера
+            self._controller.on_transform_files,
         )
         dialog.show()
     
@@ -658,6 +740,45 @@ class MainWindow:
             parent=self._root
         )
     
+    def _on_interval_changed(self, event=None):
+        """Вызывается при изменении полей интервала пользователем."""
+        if not self._entry_start or not self._entry_end:
+            return
+        
+        start = self._entry_start.get().strip()
+        end = self._entry_end.get().strip()
+        
+        if start and end:
+            self._controller.on_interval_manually_changed(start, end)
+            if self._interval_mode_label:
+                self._interval_mode_label.config(
+                    text="✏️ ручной",
+                    fg=Theme.ACCENT_ORANGE
+                )
+        else:
+            if self._interval_mode_label:
+                self._interval_mode_label.config(
+                    text="⚡ авто",
+                    fg=Theme.FG_SECONDARY
+                )
+    
+    def _on_terminate_with_confirmation(self):
+        """Останавливает процесс с подтверждением."""
+        result = messagebox.askyesno(
+            "⏹ Подтверждение остановки",
+            "Вы действительно хотите остановить текущий процесс?\n\n"
+            "⚠️ ВНИМАНИЕ:\n"
+            "• Все незавершенные расчеты будут прерваны\n"
+            "• Результаты могут быть неполными\n\n"
+            "Продолжить?",
+            parent=self._root,
+            icon='warning'
+        )
+        
+        if result:
+            self.set_status("⏹ Остановка процесса...", is_warning=True)
+            self._controller.on_terminate_process()
+    
     def _copy_output(self) -> None:
         """Копирует вывод в буфер обмена."""
         if self._output_text:
@@ -666,7 +787,9 @@ class MainWindow:
             self._root.clipboard_append(content)
             self.set_status("📋 Скопировано")
             self._root.after(2000, lambda: self.set_status("✅ Готов к работе"))
-        
+    
+    # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
+    
     def _auto_fill_standard_files(self) -> None:
         """Автозаполнение стандартных файлов."""
         from core.app_context import APP_CONTEXT
@@ -681,7 +804,6 @@ class MainWindow:
             if path.exists() and key in self._file_widgets:
                 self._file_widgets[key].set_value(str(path))
                 self._controller.on_file_selected(key, str(path))
-                # Обновляем последнюю папку из автоматически найденного файла
                 UIPersistence.update_from_path(str(path))
     
     def _poll_message_queue(self) -> None:
@@ -722,125 +844,3 @@ class MainWindow:
 ✅ Система готова к работе
         """
         self._append_output(welcome.strip(), "header")
-    
-    def _show_error(self, title: str, message: str):
-        """Показывает сообщение об ошибке."""
-        messagebox.showerror(title, message, parent=self._root)
-    
-    def _on_terminate_with_confirmation(self):
-        """Останавливает процесс с подтверждением."""
-        # ИСПРАВЛЕНО: всегда проверяем статус процесса через контроллер
-        # (контроллер сам скажет, есть ли активный процесс)
-        result = messagebox.askyesno(
-            "⏹ Подтверждение остановки",
-            "Вы действительно хотите остановить текущий процесс?\n\n"
-            "⚠️ ВНИМАНИЕ:\n"
-            "• Все незавершенные расчеты будут прерваны\n"
-            "• Результаты могут быть неполными\n\n"
-            "Продолжить?",
-            parent=self._root,
-            icon='warning'
-        )
-        
-        if result:
-            self.set_status("⏹ Остановка процесса...", is_warning=True)
-            self._controller.on_terminate_process()
-    
-    # ==================== ПУБЛИЧНЫЙ API ДЛЯ КОНТРОЛЛЕРА ====================
-    
-    def get_all_file_paths(self) -> Dict[str, str]:
-        """Возвращает словарь {тип_файла: путь} из UI."""
-        paths = {}
-        for key, widget in self._file_widgets.items():
-            value = widget.get_value()
-            if value:
-                paths[key] = value
-        return paths
-    
-    def get_sr2nav_path(self) -> str:
-        """Возвращает путь к SR2Nav.exe."""
-        widget = self._file_widgets.get('sr2nav')
-        return widget.get_value() if widget else ""
-    
-    def get_rover_path(self) -> str:
-        """Возвращает путь к файлу ровера."""
-        widget = self._file_widgets.get('rover')
-        return widget.get_value() if widget else ""
-    
-    def sync_file_paths(self, paths: Dict[str, str]) -> None:
-        """Синхронизирует пути из бэкенда в UI."""
-        for key, path in paths.items():
-            if key in self._file_widgets and path:
-                current = self._file_widgets[key].get_value()
-                if current != path:
-                    self._file_widgets[key].set_value(path)
-    
-    # ИСПРАВЛЕНО: новый метод для установки пути в конкретный виджет
-    def set_file_path(self, key: str, path: str) -> None:
-        """Устанавливает путь в конкретный виджет."""
-        if key in self._file_widgets and path:
-            self._file_widgets[key].set_value(path)
-    
-    def get_cutoff_angle(self) -> float:
-        """Возвращает угол отсечения."""
-        try:
-            return float(self._entry_angle.get()) if self._entry_angle else 7.0
-        except (ValueError, AttributeError):
-            return 7.0
-    
-    def update_time_interval(self, start: str, end: str, is_manual: bool = False) -> None:
-        """Обновляет поля временного интервала."""
-        if self._entry_start:
-            self._entry_start.delete(0, tk.END)
-            self._entry_start.insert(0, start)
-        if self._entry_end:
-            self._entry_end.delete(0, tk.END)
-            self._entry_end.insert(0, end)
-        
-        if is_manual:
-            self._interval_mode_label.config(
-                text="✏️ ручной",
-                fg=Theme.ACCENT_ORANGE
-            )
-            self._append_output(f"⏱ Интервал (ручной): {start} - {end}", "info")
-        else:
-            self._interval_mode_label.config(
-                text="⚡ авто",
-                fg=Theme.FG_SECONDARY
-            )
-            self._append_output(f"⏱ Интервал (авто): {start} - {end}", "info")
-    
-    def set_processing_state(self, is_processing: bool) -> None:
-        """Устанавливает состояние обработки (индикация)."""
-        if is_processing:
-            self._status_var.set("⏳ Выполнение операции...")
-            self._progress_bar.start(10)
-            if self._btn_terminate:
-                self._btn_terminate.config(state="normal")
-        else:
-            self._status_var.set("✅ Готов к работе")
-            self._progress_bar.stop()
-            if self._btn_terminate:
-                self._btn_terminate.config(state="disabled")
-    
-    def set_status(self, message: str, is_warning: bool = False):
-        """Устанавливает текст статуса."""
-        if self._status_var:
-            self._status_var.set(message)
-    
-    def clear_output(self) -> None:
-        """Очищает консоль вывода."""
-        if self._output_text:
-            self._output_text.delete(1.0, tk.END)
-            self._print_welcome()
-            self.set_status("🧹 Вывод очищен")
-            self._root.after(2000, lambda: self.set_status("✅ Готов к работе"))
-    
-    def show_error(self, title: str, message: str):
-        """Показывает сообщение об ошибке (для контроллера)."""
-        messagebox.showerror(title, message, parent=self._root)
-    
-    @property
-    def window(self) -> tk.Tk:
-        """Возвращает корневое окно Tkinter."""
-        return self._root
