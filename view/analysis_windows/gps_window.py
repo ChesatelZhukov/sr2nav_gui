@@ -2,7 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТОЕ ПРЕДСТАВЛЕНИЕ - Окно анализа GPS созвездия.
-ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
+ИСПРАВЛЕНО v2.2:
+- Добавлен импорт math
+- Исправлена обработка stats (проверка типа)
+- Исправлен цвет ошибки
+- Удалены неиспользуемые переменные
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -12,7 +16,8 @@ import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
-import pyperclip  # ИСПРАВЛЕНО: добавлен импорт
+import pyperclip
+import math  # ИСПРАВЛЕНО: добавлен импорт
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
@@ -23,7 +28,10 @@ class GPSAnalysisWindow:
     Окно отображения результатов анализа GPS созвездия.
     ТОЛЬКО UI, никаких вычислений!
     
-    ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
+    ИСПРАВЛЕНО v2.2:
+    - Добавлен импорт math
+    - Правильная обработка stats (проверка типа)
+    - Исправлен цвет ошибки
     """
     
     ALL_SATELLITES = [f'G{i:02d}' for i in range(1, 33)]
@@ -229,7 +237,7 @@ class GPSAnalysisWindow:
         directory = filedialog.askdirectory(
             title="Выберите папку с SVs файлами",
             initialdir=initial_dir,
-            parent=self.window  # Явно указываем родителя
+            parent=self.window
         )
         
         # Возвращаем захват и фокус окну анализа
@@ -244,7 +252,7 @@ class GPSAnalysisWindow:
         # Восстанавливаем фокус
         self.window.focus_set()
         self.window.grab_set()
-        self.window.lift()  # Поднимаем окно наверх
+        self.window.lift()
 
     def _on_refresh_from_folder(self):
         """Обновляет данные из текущей папки."""
@@ -254,19 +262,8 @@ class GPSAnalysisWindow:
         """Загружает данные из выбранной папки."""
         self.show_loading(f"Сканирование {self.current_dir.name}...")
         
-        # ИСПРАВЛЕНИЕ: Используем специальный метод для установки временной папки
-        # или модифицируем контроллер для приема пути
-        
-        # Вариант 1: Если у контроллера есть метод set_temp_gps_folder
-        if hasattr(self.controller, 'set_temp_gps_folder'):
-            self.controller.set_temp_gps_folder(str(self.current_dir))
-        
-        # Вариант 2: Или просто передаем через атрибут (как уже сделано)
-        import types
-        self.controller._temp_gps_folder = str(self.current_dir)
-        
-        # Запрашиваем анализ
-        self.controller.request_gps_analysis(self)
+        # ИСПРАВЛЕНО: передаем путь через аргумент
+        self.controller.request_gps_analysis(self, str(self.current_dir))
     
     def setup_text_tags(self):
         pass
@@ -496,8 +493,7 @@ class GPSAnalysisWindow:
     def show_error(self, error: str):
         """Показывает ошибку."""
         self.hide_loading()
-        self.status_label.config(text=f"Ошибка: {error}", fg=Theme.ERROR)
-        self.quality_label.config(text="")
+        self.status_label.config(text=f"Ошибка: {error}", fg=Theme.ACCENT_RED)  # ИСПРАВЛЕНО: красный цвет
         
         for frame in [self.plot_frame, self.stats_frame, self.report_frame]:
             for widget in frame.winfo_children():
@@ -507,7 +503,7 @@ class GPSAnalysisWindow:
                 frame,
                 text=f"❌ Ошибка загрузки данных:\n{error}",
                 font=("Arial", 11),
-                fg=Theme.ERROR,
+                fg=Theme.ACCENT_RED,  # ИСПРАВЛЕНО: красный цвет
                 bg=Theme.BG_PRIMARY,
             ).pack(expand=True)
     
@@ -547,7 +543,6 @@ class GPSAnalysisWindow:
             fig.patch.set_facecolor('white')
             self.current_ax = ax
             
-            time_range = result.get('data', {}).get('time_range', (0, 1))
             total_duration = result.get('data', {}).get('total_duration', 1)
             
             duration_min = total_duration / 60
@@ -567,7 +562,7 @@ class GPSAnalysisWindow:
                 color = '#CCCCCC'
                 alpha = 0.05
                 is_visible = False
-                ipm = 999.0
+                ipm = float('inf')
                 num_intervals = 0
                 visibility_percent = 0
                 intervals = []
@@ -575,21 +570,26 @@ class GPSAnalysisWindow:
                 if sat in satellite_stats:
                     stats = satellite_stats[sat]
                     
-                    if hasattr(stats, 'get'):
+                    # ИСПРАВЛЕНО: универсальная проверка типа
+                    if isinstance(stats, dict):
                         is_visible = stats.get('is_visible', False)
-                        ipm = stats.get('intervals_per_minute', 999)
+                        ipm = stats.get('intervals_per_minute', float('inf'))
                         num_intervals = stats.get('num_intervals', 0)
                         visibility_percent = stats.get('visibility_percent', 0)
                         intervals = stats.get('intervals', [])
                     else:
-                        is_visible = stats.is_visible
-                        ipm = stats.intervals_per_minute
-                        num_intervals = stats.num_intervals
-                        visibility_percent = stats.visibility_percent
-                        intervals = stats.intervals if hasattr(stats, 'intervals') else []
+                        is_visible = getattr(stats, 'is_visible', False)
+                        ipm = getattr(stats, 'intervals_per_minute', float('inf'))
+                        num_intervals = getattr(stats, 'num_intervals', 0)
+                        visibility_percent = getattr(stats, 'visibility_percent', 0)
+                        intervals = getattr(stats, 'intervals', [])
                     
                     if is_visible:
-                        if ipm <= 0.01:
+                        # ИСПРАВЛЕНО: обработка float('inf')
+                        if math.isinf(ipm):
+                            # Невидимый - не должно попадать сюда
+                            pass
+                        elif ipm <= 0.01:
                             color = self.STABILITY_COLORS['excellent']
                             alpha = 0.8
                             excellent_count += 1
@@ -622,12 +622,12 @@ class GPSAnalysisWindow:
                         
                         if intervals:
                             for interval in intervals:
-                                if hasattr(interval, 'get'):
+                                if isinstance(interval, dict):
                                     start = interval.get('start', 0)
                                     end = interval.get('end', 0)
                                 else:
-                                    start = interval.start if hasattr(interval, 'start') else 0
-                                    end = interval.end if hasattr(interval, 'end') else 0
+                                    start = getattr(interval, 'start', 0)
+                                    end = getattr(interval, 'end', 0)
                                 
                                 ax.barh(
                                     y=y_pos,
@@ -640,9 +640,10 @@ class GPSAnalysisWindow:
                                     linewidth=0.5
                                 )
                         
-                        if ipm > 0.2:
+                        # Отмечаем проблемные спутники
+                        if not math.isinf(ipm) and ipm > 0.2:
                             ax.plot(
-                                time_range[0] + 10, y_pos,
+                                total_duration * 0.01, y_pos,  # ИСПРАВЛЕНО: используем total_duration
                                 marker='v',
                                 color='red',
                                 markersize=8,
@@ -660,7 +661,7 @@ class GPSAnalysisWindow:
             
             ax.set_yticks(np.arange(len(self.ALL_SATELLITES)))
             ax.set_yticklabels(self.ALL_SATELLITES[::-1], fontsize=9)
-            ax.set_xlim(time_range[0], time_range[1])
+            ax.set_xlim(0, total_duration)
             
             ax.set_xlabel('Время наблюдения (секунды)', fontsize=12)
             ax.set_ylabel('Спутники GPS', fontsize=12)
@@ -836,12 +837,16 @@ class GPSAnalysisWindow:
         prn, stats = self.get_satellite_at_position(*self.last_click_coords)
         
         if prn:
-            if stats and stats.get('is_visible', False):
-                ipm = stats.get('intervals_per_minute', 0)
-                visibility = stats.get('visibility_percent', 0)
-                result = f"{time_str}\t{prn}\t{ipm:.3f}/мин\t{visibility:.1f}%"
+            if stats:
+                is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
+                if is_visible:
+                    ipm = stats.get('intervals_per_minute', 0) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 0)
+                    visibility = stats.get('visibility_percent', 0) if isinstance(stats, dict) else getattr(stats, 'visibility_percent', 0)
+                    result = f"{time_str}\t{prn}\t{ipm:.3f}/мин\t{visibility:.1f}%"
+                else:
+                    result = f"{time_str}\t{prn}\tне виден"
             else:
-                result = f"{time_str}\t{prn}\tне виден"
+                result = time_str
         else:
             result = time_str
         
@@ -884,68 +889,75 @@ class GPSAnalysisWindow:
             fg=Theme.FG_PRIMARY,
         ).pack(pady=(0, 15))
         
-        if stats and stats.get('is_visible', False):
-            ipm = stats.get('intervals_per_minute', 0)
-            num_intervals = stats.get('num_intervals', 0)
-            total_time = stats.get('total_visible_time', 0)
-            visibility = stats.get('visibility_percent', 0)
-            avg_duration = stats.get('avg_duration', 0)
+        if stats:
+            is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
             
-            if ipm <= 0.01:
-                category = "Эталонный"
-                color = self.STABILITY_COLORS['excellent']
-            elif ipm <= 0.05:
-                category = "Отличный"
-                color = self.STABILITY_COLORS['excellent']
-            elif ipm <= 0.1:
-                category = "Хороший"
-                color = self.STABILITY_COLORS['good']
-            elif ipm <= 0.2:
-                category = "Умеренный"
-                color = self.STABILITY_COLORS['moderate']
-            elif ipm <= 0.5:
-                category = "Нестабильный"
-                color = self.STABILITY_COLORS['unstable']
-            elif ipm <= 1.0:
-                category = "Плохой"
-                color = self.STABILITY_COLORS['bad']
-            else:
-                category = "Критический"
-                color = self.STABILITY_COLORS['critical']
-            
-            stats_frame = tk.Frame(main, bg=Theme.BG_PRIMARY)
-            stats_frame.pack(fill=tk.BOTH, expand=True)
-            
-            metrics = [
-                ("Категория:", category, color),
-                ("Частота пропаданий:", f"{ipm:.3f} инт/мин", color),
-                ("Количество интервалов:", str(num_intervals), Theme.FG_PRIMARY),
-                ("Общее время видимости:", f"{total_time:.0f} с ({visibility:.1f}%)", Theme.FG_PRIMARY),
-                ("Средняя длительность:", f"{avg_duration:.1f} с", Theme.FG_PRIMARY),
-            ]
-            
-            for i, (label, value, fg_color) in enumerate(metrics):
-                row = tk.Frame(stats_frame, bg=Theme.BG_PRIMARY)
-                row.pack(fill=tk.X, pady=2)
+            if is_visible:
+                ipm = stats.get('intervals_per_minute', 0) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 0)
+                num_intervals = stats.get('num_intervals', 0) if isinstance(stats, dict) else getattr(stats, 'num_intervals', 0)
+                total_time = stats.get('total_visible_time', 0) if isinstance(stats, dict) else getattr(stats, 'total_visible_time', 0)
+                visibility = stats.get('visibility_percent', 0) if isinstance(stats, dict) else getattr(stats, 'visibility_percent', 0)
+                avg_duration = stats.get('avg_duration', 0) if isinstance(stats, dict) else getattr(stats, 'avg_duration', 0)
                 
-                tk.Label(
-                    row,
-                    text=label,
-                    font=("Arial", 10, "bold"),
-                    bg=Theme.BG_PRIMARY,
-                    fg=Theme.FG_SECONDARY,
-                    width=20,
-                    anchor="w",
-                ).pack(side=tk.LEFT)
+                # ИСПРАВЛЕНО: обработка float('inf')
+                if math.isinf(ipm):
+                    category = "Ошибка данных"
+                    color = Theme.FG_SECONDARY
+                elif ipm <= 0.01:
+                    category = "Эталонный"
+                    color = self.STABILITY_COLORS['excellent']
+                elif ipm <= 0.05:
+                    category = "Отличный"
+                    color = self.STABILITY_COLORS['excellent']
+                elif ipm <= 0.1:
+                    category = "Хороший"
+                    color = self.STABILITY_COLORS['good']
+                elif ipm <= 0.2:
+                    category = "Умеренный"
+                    color = self.STABILITY_COLORS['moderate']
+                elif ipm <= 0.5:
+                    category = "Нестабильный"
+                    color = self.STABILITY_COLORS['unstable']
+                elif ipm <= 1.0:
+                    category = "Плохой"
+                    color = self.STABILITY_COLORS['bad']
+                else:
+                    category = "Критический"
+                    color = self.STABILITY_COLORS['critical']
                 
-                tk.Label(
-                    row,
-                    text=value,
-                    font=("Arial", 10),
-                    bg=Theme.BG_PRIMARY,
-                    fg=fg_color,
-                    anchor="w",
-                ).pack(side=tk.LEFT, padx=(5, 0))
+                stats_frame = tk.Frame(main, bg=Theme.BG_PRIMARY)
+                stats_frame.pack(fill=tk.BOTH, expand=True)
+                
+                metrics = [
+                    ("Категория:", category, color),
+                    ("Частота пропаданий:", f"{ipm:.3f} инт/мин" if not math.isinf(ipm) else "∞", color),
+                    ("Количество интервалов:", str(num_intervals), Theme.FG_PRIMARY),
+                    ("Общее время видимости:", f"{total_time:.0f} с ({visibility:.1f}%)", Theme.FG_PRIMARY),
+                    ("Средняя длительность:", f"{avg_duration:.1f} с", Theme.FG_PRIMARY),
+                ]
+                
+                for i, (label, value, fg_color) in enumerate(metrics):
+                    row = tk.Frame(stats_frame, bg=Theme.BG_PRIMARY)
+                    row.pack(fill=tk.X, pady=2)
+                    
+                    tk.Label(
+                        row,
+                        text=label,
+                        font=("Arial", 10, "bold"),
+                        bg=Theme.BG_PRIMARY,
+                        fg=Theme.FG_SECONDARY,
+                        width=20,
+                        anchor="w",
+                    ).pack(side=tk.LEFT)
+                    
+                    tk.Label(
+                        row,
+                        text=value,
+                        font=("Arial", 10),
+                        bg=Theme.BG_PRIMARY,
+                        fg=fg_color,
+                        anchor="w",
+                    ).pack(side=tk.LEFT, padx=(5, 0))
         else:
             tk.Label(
                 main,
@@ -1076,9 +1088,10 @@ class GPSAnalysisWindow:
             
             problem_sats = []
             for sat, stats in result.get('satellite_stats', {}).items():
-                if stats.get('is_visible', False):
-                    ipm = stats.get('intervals_per_minute', 0)
-                    if ipm > 0.2:
+                is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
+                if is_visible:
+                    ipm = stats.get('intervals_per_minute', 0) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 0)
+                    if not math.isinf(ipm) and ipm > 0.2:
                         problem_sats.append((sat, stats, ipm))
             
             if problem_sats:
@@ -1096,9 +1109,9 @@ class GPSAnalysisWindow:
                 ).pack(anchor="w", pady=(0, 5))
                 
                 for sat, stats, ipm in sorted(problem_sats, key=lambda x: x[2], reverse=True)[:10]:
-                    num_int = stats.get('num_intervals', 0)
-                    avg_dur = stats.get('avg_duration', 0)
-                    visibility = stats.get('visibility_percent', 0)
+                    num_int = stats.get('num_intervals', 0) if isinstance(stats, dict) else getattr(stats, 'num_intervals', 0)
+                    avg_dur = stats.get('avg_duration', 0) if isinstance(stats, dict) else getattr(stats, 'avg_duration', 0)
+                    visibility = stats.get('visibility_percent', 0) if isinstance(stats, dict) else getattr(stats, 'visibility_percent', 0)
                     
                     if ipm > 1.0:
                         category = "КРИТИЧНО"
@@ -1137,9 +1150,10 @@ class GPSAnalysisWindow:
             
             excellent_sats = []
             for sat, stats in result.get('satellite_stats', {}).items():
-                if stats.get('is_visible', False):
-                    ipm = stats.get('intervals_per_minute', 999)
-                    if ipm <= 0.05:
+                is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
+                if is_visible:
+                    ipm = stats.get('intervals_per_minute', 999) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 999)
+                    if not math.isinf(ipm) and ipm <= 0.05:
                         excellent_sats.append((sat, stats, ipm))
             
             if excellent_sats:
@@ -1155,7 +1169,7 @@ class GPSAnalysisWindow:
                 ).pack(anchor="w", pady=(0, 5))
                 
                 for sat, stats, ipm in excellent_sats[:5]:
-                    visibility = stats.get('visibility_percent', 0)
+                    visibility = stats.get('visibility_percent', 0) if isinstance(stats, dict) else getattr(stats, 'visibility_percent', 0)
                     tk.Label(
                         good_frame,
                         text=f"  {sat}: {ipm:.3f}/мин, видимость {visibility:.1f}%",
@@ -1251,9 +1265,10 @@ class GPSAnalysisWindow:
             
             problem_by_freq = []
             for sat, stats in result.get('satellite_stats', {}).items():
-                if stats.get('is_visible', False):
-                    ipm = stats.get('intervals_per_minute', 0)
-                    if ipm > 0.2:
+                is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
+                if is_visible:
+                    ipm = stats.get('intervals_per_minute', 0) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 0)
+                    if not math.isinf(ipm) and ipm > 0.2:
                         problem_by_freq.append((sat, stats, ipm))
             
             if problem_by_freq:
@@ -1265,8 +1280,8 @@ class GPSAnalysisWindow:
                     text_widget.insert(tk.END, f"  • Критических (>1/мин): {critical_freq}\n", "warning_critical")
                 
                 for sat, stats, ipm in sorted(problem_by_freq, key=lambda x: x[2], reverse=True)[:5]:
-                    num_int = stats.get('num_intervals', 0)
-                    avg_dur = stats.get('avg_duration', 0)
+                    num_int = stats.get('num_intervals', 0) if isinstance(stats, dict) else getattr(stats, 'num_intervals', 0)
+                    avg_dur = stats.get('avg_duration', 0) if isinstance(stats, dict) else getattr(stats, 'avg_duration', 0)
                     
                     if ipm > 1.0:
                         tag = "sat_critical"
@@ -1283,17 +1298,19 @@ class GPSAnalysisWindow:
             
             excellent_freq = []
             for sat, stats in result.get('satellite_stats', {}).items():
-                if stats.get('is_visible', False):
-                    ipm = stats.get('intervals_per_minute', 999)
-                    if ipm <= 0.05:
+                is_visible = stats.get('is_visible', False) if isinstance(stats, dict) else getattr(stats, 'is_visible', False)
+                if is_visible:
+                    ipm = stats.get('intervals_per_minute', 999) if isinstance(stats, dict) else getattr(stats, 'intervals_per_minute', 999)
+                    if not math.isinf(ipm) and ipm <= 0.05:
                         excellent_freq.append((sat, stats, ipm))
             
             if excellent_freq:
                 text_widget.insert(tk.END, f"\n✅ ЭТАЛОННЫЕ СПУТНИКИ (<0.05/мин):\n")
                 for sat, stats, ipm in excellent_freq[:5]:
+                    visibility = stats.get('visibility_percent', 0) if isinstance(stats, dict) else getattr(stats, 'visibility_percent', 0)
                     text_widget.insert(
                         tk.END,
-                        f"     {sat}: {ipm:.3f}/мин, видимость {stats.get('visibility_percent', 0):.1f}%\n",
+                        f"     {sat}: {ipm:.3f}/мин, видимость {visibility:.1f}%\n",
                         "sat_excellent"
                     )
         

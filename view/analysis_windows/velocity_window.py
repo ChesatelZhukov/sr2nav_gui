@@ -2,7 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТОЕ ПРЕДСТАВЛЕНИЕ - Окно анализа скоростей.
-ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
+ИСПРАВЛЕНО v2.2:
+- Добавлен импорт math
+- Добавлена проверка типов для данных (словарь/объект)
+- Исправлена обработка данных из контроллера
+- Удалены неиспользуемые переменные
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -12,7 +16,8 @@ import numpy as np
 from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 from pathlib import Path
-import pyperclip  # ИСПРАВЛЕНО: добавлен импорт
+import pyperclip
+import math  # ИСПРАВЛЕНО: добавлен импорт
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
@@ -21,7 +26,9 @@ from view.widgets import ModernButton, InteractiveZoom
 class VelocityAnalysisWindow:
     """
     Окно отображения результатов анализа скоростей.
-    ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
+    ИСПРАВЛЕНО v2.2:
+    - Универсальная обработка данных (словарь/объект)
+    - Правильная проверка типов
     """
     
     def __init__(self, parent, controller):
@@ -40,9 +47,6 @@ class VelocityAnalysisWindow:
         self.current_fig = None
         self.current_canvas = None
         self.plot_lines = {}
-        
-        # Всегда три оси
-        self.visible_axes = ['V_E', 'V_N', 'V_UP']
         
         # Переменные для выбора файлов
         self.file_vars: Dict[str, tk.BooleanVar] = {}
@@ -270,7 +274,7 @@ class VelocityAnalysisWindow:
         directory = filedialog.askdirectory(
             title="Выберите папку с VEL файлами",
             initialdir=initial_dir,
-            parent=self.window  # Явно указываем родителя
+            parent=self.window
         )
         
         # Возвращаем захват и фокус окну анализа
@@ -285,7 +289,7 @@ class VelocityAnalysisWindow:
         # Восстанавливаем фокус
         self.window.focus_set()
         self.window.grab_set()
-        self.window.lift()  # Поднимаем окно наверх
+        self.window.lift()
 
     def _on_refresh_from_folder(self):
         """Обновляет данные из текущей папки."""
@@ -295,12 +299,8 @@ class VelocityAnalysisWindow:
         """Загружает данные из выбранной папки."""
         self.show_loading(f"Сканирование {self.current_dir.name}...")
         
-        # ИСПРАВЛЕНИЕ: Сохраняем путь для контроллера
-        import types
-        self.controller._temp_analysis_folder = str(self.current_dir)
-        
-        # Запрашиваем анализ
-        self.controller.request_velocity_analysis(self)
+        # ИСПРАВЛЕНО: вызываем правильный метод контроллера
+        self.controller.request_velocity_analysis(self, str(self.current_dir))
     
     def create_file_selector(self, parent):
         """Создает нижнюю панель с галочками файлов."""
@@ -399,7 +399,7 @@ class VelocityAnalysisWindow:
     def show_error(self, error: str):
         """Показывает ошибку."""
         self.hide_loading()
-        self.status_label.config(text=f"Ошибка", fg=Theme.ERROR)
+        self.status_label.config(text=f"Ошибка", fg=Theme.ACCENT_RED)
         
         for frame in [self.table_frame, self.plot_frame, self.summary_frame]:
             for widget in frame.winfo_children():
@@ -409,7 +409,7 @@ class VelocityAnalysisWindow:
                 frame,
                 text=f"❌ {error}",
                 font=("Arial", 11),
-                fg=Theme.ERROR,
+                fg=Theme.ACCENT_RED,
                 bg=Theme.BG_PRIMARY,
             ).pack(expand=True)
     
@@ -549,20 +549,43 @@ class VelocityAnalysisWindow:
             tree.column(col, width=width, minwidth=50)
         
         for filename, result in self.analysis_results.items():
-            data = result.get('data', {})
-            stats = result.get('statistics', {})
+            # ИСПРАВЛЕНО: универсальная проверка типа
+            if isinstance(result, dict):
+                data = result.get('data', {})
+                stats = result.get('statistics', {})
+            else:
+                data = getattr(result, 'data', {})
+                stats = getattr(result, 'statistics', {})
             
-            time_span = f"{data.get('time_span', [0,0])[0]:.0f}-{data.get('time_span', [0,0])[1]:.0f}с"
+            # Получаем time_span с проверкой типа
+            if isinstance(data, dict):
+                time_span = data.get('time_span', [0, 0])
+                rows = stats.get('rows_analyzed', 0)
+                max_v_e = stats.get('max_v_e', 0)
+                max_v_n = stats.get('max_v_n', 0)
+                max_v_up = stats.get('max_v_up', 0)
+                max_speed_2d = stats.get('max_speed_2d', 0)
+                max_speed_3d = stats.get('max_speed_3d', 0)
+            else:
+                time_span = getattr(data, 'time_span', [0, 0])
+                rows = getattr(stats, 'rows_analyzed', 0)
+                max_v_e = getattr(stats, 'max_v_e', 0)
+                max_v_n = getattr(stats, 'max_v_n', 0)
+                max_v_up = getattr(stats, 'max_v_up', 0)
+                max_speed_2d = getattr(stats, 'max_speed_2d', 0)
+                max_speed_3d = getattr(stats, 'max_speed_3d', 0)
+            
+            time_span_str = f"{time_span[0]:.0f}-{time_span[1]:.0f}с" if time_span else "0-0с"
             
             values = [
                 filename[:30] + "..." if len(filename) > 30 else filename,
-                stats.get('rows_analyzed', 0),
-                time_span,
-                f"{stats.get('max_v_e', 0):.3f}",
-                f"{stats.get('max_v_n', 0):.3f}",
-                f"{stats.get('max_v_up', 0):.3f}",
-                f"{stats.get('max_speed_2d', 0):.3f}",
-                f"{stats.get('max_speed_3d', 0):.3f}",
+                rows,
+                time_span_str,
+                f"{max_v_e:.3f}",
+                f"{max_v_n:.3f}",
+                f"{max_v_up:.3f}",
+                f"{max_speed_2d:.3f}",
+                f"{max_speed_3d:.3f}",
             ]
             
             tree.insert('', 'end', values=values)
@@ -660,16 +683,39 @@ class VelocityAnalysisWindow:
                     continue
                 
                 result = self.analysis_results[filename]
-                data = result.get('data', {})
                 
-                time = data.get('time', np.array([]))
-                v_e = data.get('v_e', np.array([]))
-                v_n = data.get('v_n', np.array([]))
-                v_up = data.get('v_up', np.array([]))
+                # ИСПРАВЛЕНО: универсальная проверка типа
+                if isinstance(result, dict):
+                    data = result.get('data', {})
+                else:
+                    data = getattr(result, 'data', {})
+                
+                # Получаем данные с проверкой типа
+                if isinstance(data, dict):
+                    time = data.get('time', np.array([]))
+                    v_e = data.get('v_e', np.array([]))
+                    v_n = data.get('v_n', np.array([]))
+                    v_up = data.get('v_up', np.array([]))
+                else:
+                    time = getattr(data, 'time', np.array([]))
+                    v_e = getattr(data, 'v_e', np.array([]))
+                    v_n = getattr(data, 'v_n', np.array([]))
+                    v_up = getattr(data, 'v_up', np.array([]))
+                
+                # Преобразуем в numpy массивы если это списки
+                if isinstance(time, list):
+                    time = np.array(time)
+                if isinstance(v_e, list):
+                    v_e = np.array(v_e)
+                if isinstance(v_n, list):
+                    v_n = np.array(v_n)
+                if isinstance(v_up, list):
+                    v_up = np.array(v_up)
                 
                 if len(time) == 0:
                     continue
                 
+                # Прореживаем для производительности
                 if len(time) > 1000:
                     step = len(time) // 1000
                     time = time[::step]
@@ -717,9 +763,10 @@ class VelocityAnalysisWindow:
             # Уничтожаем старый зум если есть
             if self.interactive_zoom:
                 try:
-                    del self.interactive_zoom
+                    self.interactive_zoom.cleanup()
                 except:
                     pass
+                self.interactive_zoom = None
             
             self.interactive_zoom = InteractiveZoom(fig, axes)
             self.current_fig = fig
@@ -732,7 +779,7 @@ class VelocityAnalysisWindow:
             traceback.print_exc()
             tk.Label(
                 self.plot_frame,
-                text=f"Ошибка: {str(e)}",
+                text=f"Ошибка построения графика:\n{str(e)}",
                 font=("Arial", 11),
                 fg=Theme.ERROR,
                 bg=Theme.BG_PRIMARY,
@@ -765,7 +812,7 @@ class VelocityAnalysisWindow:
     def on_refresh(self):
         """Обновление."""
         self.show_loading("Обновление...")
-        self.controller.request_velocity_analysis(self)
+        self.controller.request_velocity_analysis(self, str(self.current_dir))
     
     def on_export(self):
         """Экспорт."""

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТАЯ МОДЕЛЬ - Анализатор GPS созвездия.
-ИСПРАВЛЕНО v3.0:
-1. Корректное разделение: raw_intervals для частоты, merged_intervals для отображения
-2. Пиковая частота считается по raw_intervals (микро-интервалам)
-3. Для одного непрерывного интервала частота = 0.0
+ИСПРАВЛЕНО v3.1:
+- Исправлена ошибка индексации в detect_gaps
+- Для невидимых спутников intervals_per_minute возвращает float('inf')
+- Удалены неиспользуемые атрибуты пиковых окон
 """
 import os
 import numpy as np
@@ -53,12 +53,6 @@ class SatelliteStatistics:
     peak_window_center: float = 0.0
     """Центр окна с максимальной частотой (сек)"""
     
-    peak_window_start: float = 0.0
-    """Начало окна с максимальной частотой (сек)"""
-    
-    peak_window_end: float = 0.0
-    """Конец окна с максимальной частотой (сек)"""
-    
     peak_window_count: int = 0
     """Количество интервалов в пиковом окне"""
     
@@ -66,10 +60,10 @@ class SatelliteStatistics:
     def intervals_per_minute(self) -> float:
         """
         Возвращает ПИКОВУЮ НОРМАЛИЗОВАННУЮ ЧАСТОТУ.
-        ИСПРАВЛЕНО: если сырых интервалов <= 1, возвращаем 0.0
+        ИСПРАВЛЕНО v3.1: для невидимых спутников возвращаем float('inf')
         """
         if not self.is_visible:
-            return 999.0
+            return float('inf')
         
         # Если спутник виден одним непрерывным интервалом - частота 0
         if len(self.raw_intervals) <= 1:
@@ -304,10 +298,11 @@ class GPSConstellationAnalysisResult:
 class GPSConstellationAnalyzer:
     """
     ЧИСТАЯ МОДЕЛЬ - Анализатор GPS созвездия.
-    ИСПРАВЛЕНО v3.0:
+    ИСПРАВЛЕНО v3.1:
     - raw_intervals для расчета частоты
     - merged_intervals для отображения
     - Один непрерывный интервал = частота 0.0
+    - Исправлена ошибка индексации в detect_gaps
     """
     
     ALL_SATELLITES = [f'G{i:02d}' for i in range(1, 33)]
@@ -488,7 +483,7 @@ class GPSConstellationAnalyzer:
             
             df = pd.read_csv(
                 filepath,
-                sep=r'\s+',  # <-- ИСПРАВЛЕНО: сырая строка
+                sep=r'\s+',
                 header=0,
                 engine='python',
                 on_bad_lines='skip'
@@ -518,6 +513,10 @@ class GPSConstellationAnalyzer:
             return None
     
     def detect_gaps(self, visibility: np.ndarray, time_seconds: np.ndarray) -> List[SatelliteInterval]:
+        """
+        Детектирует интервалы видимости спутника.
+        ИСПРАВЛЕНО v3.1: безопасная индексация
+        """
         if not np.any(visibility):
             return []
         
@@ -531,15 +530,16 @@ class GPSConstellationAnalyzer:
         if visibility[-1]:
             ends = np.append(ends, len(visibility))
         
-        # Проверка на соответствие длин
-        min_len = min(len(starts), len(ends))
         intervals = []
+        n_times = len(time_seconds)
         
-        for i in range(min_len):
+        for i in range(min(len(starts), len(ends))):
             start_idx = starts[i]
-            end_idx = min(ends[i] - 1, len(time_seconds) - 1)
+            # Безопасный расчет конечного индекса
+            end_idx = min(ends[i] - 1, n_times - 1)
             
-            if start_idx < len(time_seconds) and end_idx < len(time_seconds):
+            # Проверка, что индексы валидны
+            if 0 <= start_idx < n_times and 0 <= end_idx < n_times and start_idx <= end_idx:
                 intervals.append(SatelliteInterval(
                     start=float(time_seconds[start_idx]),
                     end=float(time_seconds[end_idx])
@@ -608,11 +608,12 @@ class GPSConstellationAnalyzer:
         """
         Анализирует один SVs файл.
         
-        ИСПРАВЛЕНО v3.0:
+        ИСПРАВЛЕНО v3.1:
         1. Детекция ВСЕХ интервалов видимости (raw_intervals)
         2. Объединение микро-пропаданий (merged_intervals) для отображения
         3. Расчет пиковой частоты по raw_intervals
         4. Если raw_intervals <= 1 → частота = 0.0
+        5. Исправлена безопасная индексация
         """
         filename = os.path.basename(filepath)
         
@@ -665,7 +666,7 @@ class GPSConstellationAnalyzer:
                 )
                 continue
             
-            # ========== 3.3 ИСПРАВЛЕНИЕ: ДВА ТИПА ИНТЕРВАЛОВ ==========
+            # ========== 3.3 ДВА ТИПА ИНТЕРВАЛОВ ==========
             # СЫРЫЕ интервалы - для расчета частоты
             raw_intervals = self.detect_gaps(visibility, time_seconds)
             
@@ -684,7 +685,7 @@ class GPSConstellationAnalyzer:
             # ---------- 3.5 Сохраняем СЫРЫЕ интервалы ----------
             stats.raw_intervals = raw_intervals
             
-            # ========== 3.6 ИСПРАВЛЕННЫЙ РАСЧЕТ ПИКОВОЙ ЧАСТОТЫ ==========
+            # ========== 3.6 РАСЧЕТ ПИКОВОЙ ЧАСТОТЫ ==========
             # Используем raw_intervals, а не final_intervals!
             if raw_intervals and len(raw_intervals) > 1:  # Только если есть микро-интервалы
                 start_times = []
@@ -723,8 +724,6 @@ class GPSConstellationAnalyzer:
                 stats.peak_intervals_per_minute = peak_raw_ipm
                 stats.peak_intervals_per_minute_norm = peak_normalized_ipm
                 stats.peak_window_center = optimal_window_center
-                stats.peak_window_start = optimal_window_center - WINDOW_SECONDS/2
-                stats.peak_window_end = optimal_window_center + WINDOW_SECONDS/2
                 stats.peak_window_count = max_intervals_in_window
             else:
                 # Один непрерывный интервал или нет интервалов
@@ -865,7 +864,7 @@ class GPSConstellationAnalyzer:
                 
                 for i, (sat, stats) in enumerate(problematic, 1):
                     row[f'Problem{i}_Satellite'] = sat
-                    row[f'Problem{i}_Intervals'] = len(stats.raw_intervals)  # сырые интервалы
+                    row[f'Problem{i}_Intervals'] = len(stats.raw_intervals)
                     row[f'Problem{i}_AvgDuration'] = round(stats.avg_duration, 1)
                     row[f'Problem{i}_Visibility_%'] = round(stats.visibility_percent, 1)
                     row[f'Problem{i}_IntervalsPerMinute'] = round(stats.intervals_per_minute, 3)

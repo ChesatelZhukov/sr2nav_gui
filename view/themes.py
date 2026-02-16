@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Светлая цветовая тема для интерфейса.
+
+ИСПРАВЛЕНО v2.1: исправлена опечатка в комментарии
 """
 from dataclasses import dataclass
 
@@ -34,7 +36,7 @@ class Theme:
     ACCENT_PURPLE: str = "#6f42c1"
     ACCENT_CYAN: str = "#0dcaf0"
     
-    # СтатусыУ
+    # Статусы (исправлена опечатка в комментарии)
     SUCCESS: str = "#212529"
     WARNING: str = "#E7D10A"
     ERROR: str = "#dc3545"

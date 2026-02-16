@@ -279,7 +279,7 @@ class CollapsibleFrame(tk.Frame):
 class InteractiveZoom:
     """
     Интерактивный зум для matplotlib графиков.
-    ИСПРАВЛЕНО v2.0: правильная очистка ресурсов, явный метод cleanup
+    ИСПРАВЛЕНО v2.1: правильная очистка ресурсов, явный метод cleanup
     """
     
     def __init__(self, fig, axes):
@@ -474,7 +474,7 @@ class InteractiveZoom:
     
     def __del__(self):
         """Резервная очистка при удалении (на всякий случай)."""
-        self.cleanup()
-
-
-# Остальные классы (если есть) остаются без изменений
+        try:
+            self.cleanup()
+        except Exception:
+            pass

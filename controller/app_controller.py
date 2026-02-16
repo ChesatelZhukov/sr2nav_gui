@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Главный контроллер приложения - ЧИСТАЯ ОРКЕСТРАЦИЯ.
+ИСПРАВЛЕНО v2.3:
+- Удалено дублирование метода request_gps_analysis
+- Добавлен метод request_velocity_analysis
+- Исправлены все вызовы анализаторов
 """
 import asyncio
 import queue
@@ -268,8 +272,6 @@ class ApplicationController:
                 ))
         
         self._run_async(_run())
-
-
 
     # ==================== ЗАПУСК ПРОЦЕССОВ ====================
     
@@ -607,74 +609,64 @@ class ApplicationController:
     
     # ==================== АНАЛИЗ ДАННЫХ ====================
     
-    def on_analyze_velocities(self) -> None:
-        """Запрос на анализ скоростей."""
-        if not self._window:
-            return
+    def _perform_analysis(self, 
+                        window: Any, 
+                        analysis_name: str,
+                        analyze_func: callable,
+                        prepare_results_func: callable) -> None:
+        """
+        Общий метод для выполнения анализа.
         
-        if not APP_CONTEXT.results_dir.exists():
-            self._publish_message(AppMessage.error(
-                f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}",
-                source="Controller"
-            ))
-            return
-        
-        VelocityAnalysisWindow(self._window.window, self)
-    
-    def request_velocity_analysis(self, window: VelocityAnalysisWindow) -> None:
-        """Обработка запроса от окна анализа скоростей."""
+        Args:
+            window: Окно анализа (уже должно содержать актуальный путь в current_dir)
+            analysis_name: Название анализа (для сообщений)
+            analyze_func: Функция для выполнения анализа (принимает путь)
+            prepare_results_func: Функция для подготовки результатов для View
+        """
         async def _run():
             try:
-                # ИСПРАВЛЕНИЕ: Используем путь из окна, если он есть
-                if hasattr(window, 'current_dir') and window.current_dir:
-                    folder_path = str(window.current_dir)
-                    self._publish_message(AppMessage.info(
-                        f"🔍 Анализ скоростей в папке: {folder_path}",
-                        source="Controller"
-                    ))
-                else:
-                    folder_path = str(APP_CONTEXT.results_dir)
-                    self._publish_message(AppMessage.info(
-                        f"🔍 Анализ скоростей в папке результатов: {APP_CONTEXT.results_dir.name}",
-                        source="Controller"
-                    ))
+                # Получаем путь из окна (он уже должен быть обновлен)
+                folder_path = str(window.current_dir)
+                
+                self._publish_message(AppMessage.info(
+                    f"🔍 {analysis_name} в папке: {folder_path}",
+                    source="Controller"
+                ))
                 
                 # Проверяем существование папки
                 if not os.path.exists(folder_path):
-                    self._publish_message(AppMessage.error(
-                        f"Папка не найдена: {folder_path}",
-                        source="Controller"
-                    ))
-                    self._window.window.after(0, lambda: window.show_error(f"Папка не найдена:\n{folder_path}"))
+                    error_msg = f"Папка не найдена: {folder_path}"
+                    self._publish_message(AppMessage.error(error_msg, source="Controller"))
+                    self._window.window.after(0, lambda: window.show_error(error_msg))
                     return
                 
                 # Выполняем анализ
-                results = self._velocity_analyzer.analyze_all(folder_path)
+                results = analyze_func(folder_path)
                 
                 if not results:
                     self._publish_message(AppMessage.warning(
-                        f"В папке {folder_path} не найдено VEL файлов",
+                        f"В папке {folder_path} не найдено файлов для анализа",
                         source="Controller"
                     ))
-                    self._window.window.after(0, lambda: window.show_error("VEL файлы не найдены"))
+                    self._window.window.after(0, lambda: window.show_error("Файлы не найдены"))
                     return
                 
-                # Получаем сводную статистику
-                summary = self._velocity_analyzer.get_summary_statistics()
-                
-                # Преобразуем результаты для отображения
-                view_results = self._prepare_velocity_results_for_view(results)
+                # Подготавливаем результаты для отображения
+                view_results, extra = prepare_results_func(results)
                 
                 # Обновляем UI в главном потоке
-                self._window.window.after(0, lambda: window.update_results(view_results, summary))
+                if extra:
+                    self._window.window.after(0, lambda: window.update_results(view_results, extra))
+                else:
+                    self._window.window.after(0, lambda: window.update_results(view_results))
                 
                 self._publish_message(AppMessage.success(
-                    f"✅ Анализ скоростей завершен. Найдено файлов: {len(results)}",
+                    f"✅ {analysis_name} завершен. Найдено файлов: {len(results)}",
                     source="Controller"
                 ))
                 
             except Exception as e:
-                error_msg = f"Ошибка анализа скоростей: {str(e)}"
+                error_msg = f"Ошибка {analysis_name.lower()}: {str(e)}"
                 self._publish_message(AppMessage.error(error_msg, source="Controller"))
                 import traceback
                 traceback.print_exc()
@@ -682,7 +674,36 @@ class ApplicationController:
         
         self._run_async(_run())
     
-    def _prepare_velocity_results_for_view(self, results: Dict) -> Dict:
+    def on_analyze_velocities(self) -> None:
+        """Запрос на анализ скоростей."""
+        if not self._window:
+            return
+        
+        if not APP_CONTEXT.results_dir.exists():
+            error_msg = f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}"
+            self._publish_message(AppMessage.error(error_msg, source="Controller"))
+            from tkinter import messagebox
+            messagebox.showerror("Ошибка", error_msg, parent=self._window.window)
+            return
+        
+        VelocityAnalysisWindow(self._window.window, self)
+    
+    def request_velocity_analysis(self, window: VelocityAnalysisWindow, folder_path: str) -> None:
+        """
+        Обработка запроса от окна анализа скоростей.
+        
+        ИСПРАВЛЕНО v2.3: добавлен метод
+        """
+        window.current_dir = Path(folder_path)
+        
+        self._perform_analysis(
+            window=window,
+            analysis_name="Анализ скоростей",
+            analyze_func=lambda path: self._velocity_analyzer.analyze_all(path),
+            prepare_results_func=self._prepare_velocity_results_for_view
+        )
+    
+    def _prepare_velocity_results_for_view(self, results: Dict) -> Tuple[Dict, Dict]:
         """Преобразует результаты Model в формат для View."""
         view_results = {}
         for filename, result in results.items():
@@ -712,7 +733,11 @@ class ApplicationController:
                     'mean_speed_3d': result.statistics.mean_speed_3d,
                 }
             }
-        return view_results
+        
+        # Получаем сводную статистику
+        summary = self._velocity_analyzer.get_summary_statistics()
+        
+        return view_results, summary
     
     def export_velocity_analysis(self, output_file: str) -> bool:
         """Экспорт анализа скоростей в CSV."""
@@ -724,73 +749,30 @@ class ApplicationController:
             return
         
         if not APP_CONTEXT.results_dir.exists():
-            self._publish_message(AppMessage.error(
-                f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}",
-                source="Controller"
-            ))
+            error_msg = f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}"
+            self._publish_message(AppMessage.error(error_msg, source="Controller"))
+            from tkinter import messagebox
+            messagebox.showerror("Ошибка", error_msg, parent=self._window.window)
             return
         
         GPSAnalysisWindow(self._window.window, self)
     
-    def request_gps_analysis(self, window: GPSAnalysisWindow) -> None:
-        """Обработка запроса от окна анализа GPS."""
-        async def _run():
-            try:
-                # ИСПРАВЛЕНИЕ: Используем путь из окна, если он есть
-                if hasattr(window, 'current_dir') and window.current_dir:
-                    folder_path = str(window.current_dir)
-                    self._publish_message(AppMessage.info(
-                        f"🔍 Анализ GPS созвездия в папке: {folder_path}",
-                        source="Controller"
-                    ))
-                else:
-                    folder_path = str(APP_CONTEXT.results_dir)
-                    self._publish_message(AppMessage.info(
-                        f"🔍 Анализ GPS созвездия в папке результатов: {APP_CONTEXT.results_dir.name}",
-                        source="Controller"
-                    ))
-                
-                # Проверяем существование папки
-                if not os.path.exists(folder_path):
-                    self._publish_message(AppMessage.error(
-                        f"Папка не найдена: {folder_path}",
-                        source="Controller"
-                    ))
-                    self._window.window.after(0, lambda: window.show_error(f"Папка не найдена:\n{folder_path}"))
-                    return
-                
-                # Выполняем анализ
-                results = self._gps_analyzer.analyze_all(folder_path)
-                
-                if not results:
-                    self._publish_message(AppMessage.warning(
-                        f"В папке {folder_path} не найдено SVs файлов",
-                        source="Controller"
-                    ))
-                    self._window.window.after(0, lambda: window.show_error("Файлы .SVs не найдены"))
-                    return
-                
-                # Преобразуем результаты для отображения
-                view_results = self._prepare_gps_results_for_view(results)
-                
-                # Обновляем UI в главном потоке
-                self._window.window.after(0, lambda: window.update_results(view_results))
-                
-                self._publish_message(AppMessage.success(
-                    f"✅ Анализ GPS завершен. Найдено файлов: {len(results)}",
-                    source="Controller"
-                ))
-                
-            except Exception as e:
-                error_msg = f"Ошибка анализа GPS: {str(e)}"
-                self._publish_message(AppMessage.error(error_msg, source="Controller"))
-                import traceback
-                traceback.print_exc()
-                self._window.window.after(0, lambda: window.show_error(error_msg))
+    def request_gps_analysis(self, window: GPSAnalysisWindow, folder_path: str) -> None:
+        """
+        Обработка запроса от окна анализа GPS.
         
-        self._run_async(_run())
+        ИСПРАВЛЕНО v2.3: единый метод с правильной сигнатурой
+        """
+        window.current_dir = Path(folder_path)
+        
+        self._perform_analysis(
+            window=window,
+            analysis_name="Анализ GPS созвездия",
+            analyze_func=lambda path: self._gps_analyzer.analyze_all(path),
+            prepare_results_func=self._prepare_gps_results_for_view
+        )
     
-    def _prepare_gps_results_for_view(self, results: Dict) -> Dict:
+    def _prepare_gps_results_for_view(self, results: Dict) -> Tuple[Dict, None]:
         """Преобразует результаты GPS анализа в формат для View."""
         view_results = {}
         for filename, result in results.items():
@@ -849,7 +831,7 @@ class ApplicationController:
                 },
                 'summary': summary
             }
-        return view_results
+        return view_results, None
     
     def export_gps_analysis(self, output_file: str) -> bool:
         """Экспорт анализа GPS созвездия в CSV."""
