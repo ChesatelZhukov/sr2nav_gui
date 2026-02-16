@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТОЕ ПРЕДСТАВЛЕНИЕ - Окно анализа скоростей.
-ИСПРАВЛЕНО: убраны надписи, исправлен зум, убран скроллбар
+ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -11,17 +11,17 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
+from pathlib import Path
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
 from matplotlib.widgets import RectangleSelector
 
 
-
 class VelocityAnalysisWindow:
     """
     Окно отображения результатов анализа скоростей.
-    ИСПРАВЛЕНО: убраны надписи, убран скроллбар, файлы в одну строку
+    ИСПРАВЛЕНО: добавлен выбор папки как в трансформации
     """
     
     def __init__(self, parent, controller):
@@ -32,7 +32,7 @@ class VelocityAnalysisWindow:
         """
         self.parent = parent
         self.controller = controller
-        self.results_dir = str(controller.app_context.results_dir)
+        self.current_dir = Path(controller.app_context.results_dir)
         
         # Данные
         self.analysis_results = None
@@ -58,9 +58,7 @@ class VelocityAnalysisWindow:
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         
         self.create_widgets()
-        
-        # Запрашиваем данные
-        self.controller.request_velocity_analysis(self)
+        self.show_folder_selection_prompt()
     
     def on_close(self):
         """Закрытие окна."""
@@ -94,7 +92,7 @@ class VelocityAnalysisWindow:
         main_container = tk.Frame(self.window, bg=Theme.BG_PRIMARY)
         main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # ============ ВЕРХНЯЯ ПАНЕЛЬ ============
+        # ============ ВЕРХНЯЯ ПАНЕЛЬ С ЗАГОЛОВКОМ ============
         header = tk.Frame(main_container, bg=Theme.BG_PRIMARY)
         header.pack(fill=tk.X, pady=(0, 10))
 
@@ -105,17 +103,10 @@ class VelocityAnalysisWindow:
             fg=Theme.FG_PRIMARY,
             bg=Theme.BG_PRIMARY,
         ).pack(side=tk.LEFT)
-
+        
+        # Панель с кнопками действий
         btn_frame = tk.Frame(header, bg=Theme.BG_PRIMARY)
         btn_frame.pack(side=tk.RIGHT)
-
-        ModernButton(
-            btn_frame,
-            text="🔄 Обновить",
-            command=self.on_refresh,
-            width=10,
-            font=("Segoe UI", 10),
-        ).pack(side=tk.LEFT, padx=2)
 
         ModernButton(
             btn_frame,
@@ -153,7 +144,65 @@ class VelocityAnalysisWindow:
             font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=2)
         
-        # Прогресс-бар
+        # ============ СЕКЦИЯ ВЫБОРА ПАПКИ ============
+        folder_frame = tk.Frame(main_container, bg=Theme.BG_PRIMARY)
+        folder_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Подпись
+        tk.Label(
+            folder_frame,
+            text="📂 Папка с VEL файлами:",
+            font=("Segoe UI", 10, "bold"),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
+        ).pack(anchor="w")
+        
+        # Контейнер для поля ввода и кнопок
+        dir_container = tk.Frame(folder_frame, bg=Theme.BG_PRIMARY)
+        dir_container.pack(fill=tk.X, pady=(5, 0))
+        
+        # Поле отображения пути (только для чтения)
+        self._dir_var = tk.StringVar(value=str(self.current_dir))
+        
+        self._dir_entry = tk.Entry(
+            dir_container,
+            textvariable=self._dir_var,
+            font=("Consolas", 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
+            relief=tk.SOLID,
+            bd=1,
+            state='readonly',
+            readonlybackground=Theme.BG_SECONDARY,
+        )
+        self._dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        # Кнопка выбора папки
+        ModernButton(
+            dir_container,
+            text="📂 Выбрать папку...",
+            command=self._on_browse_folder,
+            width=15,
+            font=("Segoe UI", 10),
+            bg=Theme.ACCENT_BLUE,
+            fg="white",
+        ).pack(side=tk.RIGHT)
+        
+        # Кнопка сканирования
+        ModernButton(
+            dir_container,
+            text="🔄 Сканировать",
+            command=self._on_refresh_from_folder,
+            width=12,
+            font=("Segoe UI", 10),
+            bg=Theme.ACCENT_GREEN,
+            fg="white",
+        ).pack(side=tk.RIGHT, padx=(0, 5))
+        
+        # Разделитель
+        tk.Frame(main_container, height=1, bg=Theme.BORDER).pack(fill=tk.X, pady=(0, 10))
+        
+        # ============ ПРОГРЕСС-БАР ============
         self.create_progress_bar(main_container)
         
         # ============ ВКЛАДКИ ============
@@ -172,13 +221,75 @@ class VelocityAnalysisWindow:
         self.summary_frame = tk.Frame(self.notebook, bg=Theme.BG_PRIMARY)
         self.notebook.add(self.summary_frame, text="Сводка")
         
-        # ============ НИЖНЯЯ ПАНЕЛЬ - ТОЛЬКО ГАЛОЧКИ ============
+        # ============ НИЖНЯЯ ПАНЕЛЬ - ГАЛОЧКИ ФАЙЛОВ ============
         self.create_file_selector(main_container)
         
-        # Статусная строка
+        # ============ СТАТУСНАЯ СТРОКА ============
         self.create_status_bar(main_container)
+    
+    def show_folder_selection_prompt(self):
+        """Показывает предложение выбрать папку."""
+        for frame in [self.plot_frame, self.table_frame, self.summary_frame]:
+            for widget in frame.winfo_children():
+                widget.destroy()
+            
+            tk.Label(
+                frame,
+                text="👆 Выберите папку с VEL файлами в верхней панели",
+                font=("Arial", 12),
+                fg=Theme.FG_SECONDARY,
+                bg=Theme.BG_PRIMARY,
+            ).pack(expand=True)
+
+    def _on_browse_folder(self):
+        """Открывает диалог выбора папки с VEL файлами."""
+        from view.main_window import UIPersistence
         
-        self.show_loading("Загрузка...")
+        # Запоминаем, что окно анализа сейчас активно
+        self.window.focus_set()
+        self.window.grab_set()
+        
+        initial_dir = UIPersistence.get_last_dir()
+        if not initial_dir:
+            initial_dir = str(self.current_dir)
+        
+        # Временно отпускаем захват для диалога
+        self.window.grab_release()
+        
+        directory = filedialog.askdirectory(
+            title="Выберите папку с VEL файлами",
+            initialdir=initial_dir,
+            parent=self.window  # Явно указываем родителя
+        )
+        
+        # Возвращаем захват и фокус окну анализа
+        if directory:
+            self.current_dir = Path(directory)
+            self._dir_var.set(str(self.current_dir))
+            UIPersistence.set_last_dir(directory)
+            
+            # Загружаем данные
+            self._load_data_from_folder()
+        
+        # Восстанавливаем фокус
+        self.window.focus_set()
+        self.window.grab_set()
+        self.window.lift()  # Поднимаем окно наверх
+
+    def _on_refresh_from_folder(self):
+        """Обновляет данные из текущей папки."""
+        self._load_data_from_folder()
+
+    def _load_data_from_folder(self):
+        """Загружает данные из выбранной папки."""
+        self.show_loading(f"Сканирование {self.current_dir.name}...")
+        
+        # ИСПРАВЛЕНИЕ: Сохраняем путь для контроллера
+        import types
+        self.controller._temp_analysis_folder = str(self.current_dir)
+        
+        # Запрашиваем анализ
+        self.controller.request_velocity_analysis(self)
     
     def create_file_selector(self, parent):
         """Создает нижнюю панель с галочками файлов."""
@@ -189,86 +300,6 @@ class VelocityAnalysisWindow:
         # Контейнер для галочек без прокрутки
         self.file_container = tk.Frame(self.file_frame, bg=Theme.BG_SECONDARY)
         self.file_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-    
-    def update_file_list(self):
-        """Обновляет список файлов в нижней панели."""
-        # Очищаем старый список
-        for widget in self.file_container.winfo_children():
-            widget.destroy()
-        
-        self.file_vars.clear()
-        
-        if not self.analysis_results:
-            tk.Label(
-                self.file_container,
-                text="Нет файлов",
-                font=("Segoe UI", 10),
-                bg=Theme.BG_SECONDARY,
-                fg=Theme.FG_SECONDARY,
-            ).pack(side=tk.LEFT, padx=5)
-            return
-        
-        # Сортируем файлы
-        sorted_files = sorted(self.analysis_results.keys())
-        
-        # Создаем чекбоксы для каждого файла
-        for filename in sorted_files:
-            var = tk.BooleanVar(value=True)
-            self.file_vars[filename] = var
-            
-            # Обрезаем длинные имена
-            display_name = filename
-            if len(display_name) > 25:
-                display_name = display_name[:22] + "..."
-            
-            cb = tk.Checkbutton(
-                self.file_container,
-                text=display_name,
-                variable=var,
-                command=self.update_plot_visibility,
-                bg=Theme.BG_SECONDARY,
-                fg=Theme.FG_PRIMARY,
-                activebackground=Theme.HOVER,
-                font=("Consolas", 9),
-                anchor="w",
-            )
-            cb.pack(side=tk.LEFT, padx=8)
-            
-            # Всплывающая подсказка
-            self.create_tooltip(cb, filename)
-    
-    def create_tooltip(self, widget, text):
-        """Создает всплывающую подсказку."""
-        def show_tooltip(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            
-            label = tk.Label(
-                tooltip,
-                text=text,
-                bg="#ffffe0",
-                fg=Theme.FG_PRIMARY,
-                relief=tk.SOLID,
-                borderwidth=1,
-                font=("Consolas", 8),
-                padx=5,
-                pady=2
-            )
-            label.pack()
-            
-            def hide_tooltip():
-                tooltip.destroy()
-            
-            widget.tooltip = tooltip
-            widget.after(3000, hide_tooltip)
-        
-        def hide_tooltip(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
-        
-        widget.bind('<Enter>', show_tooltip)
-        widget.bind('<Leave>', hide_tooltip)
     
     def create_progress_bar(self, parent):
         """Создает прогресс-бар."""
@@ -372,6 +403,86 @@ class VelocityAnalysisWindow:
             ).pack(expand=True)
     
     # ============ УПРАВЛЕНИЕ ФАЙЛАМИ ============
+    
+    def update_file_list(self):
+        """Обновляет список файлов в нижней панели."""
+        # Очищаем старый список
+        for widget in self.file_container.winfo_children():
+            widget.destroy()
+        
+        self.file_vars.clear()
+        
+        if not self.analysis_results:
+            tk.Label(
+                self.file_container,
+                text="Нет файлов",
+                font=("Segoe UI", 10),
+                bg=Theme.BG_SECONDARY,
+                fg=Theme.FG_SECONDARY,
+            ).pack(side=tk.LEFT, padx=5)
+            return
+        
+        # Сортируем файлы
+        sorted_files = sorted(self.analysis_results.keys())
+        
+        # Создаем чекбоксы для каждого файла
+        for filename in sorted_files:
+            var = tk.BooleanVar(value=True)
+            self.file_vars[filename] = var
+            
+            # Обрезаем длинные имена
+            display_name = filename
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+            
+            cb = tk.Checkbutton(
+                self.file_container,
+                text=display_name,
+                variable=var,
+                command=self.update_plot_visibility,
+                bg=Theme.BG_SECONDARY,
+                fg=Theme.FG_PRIMARY,
+                activebackground=Theme.HOVER,
+                font=("Consolas", 9),
+                anchor="w",
+            )
+            cb.pack(side=tk.LEFT, padx=8)
+            
+            # Всплывающая подсказка
+            self.create_tooltip(cb, filename)
+    
+    def create_tooltip(self, widget, text):
+        """Создает всплывающую подсказку."""
+        def show_tooltip(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            
+            label = tk.Label(
+                tooltip,
+                text=text,
+                bg="#ffffe0",
+                fg=Theme.FG_PRIMARY,
+                relief=tk.SOLID,
+                borderwidth=1,
+                font=("Consolas", 8),
+                padx=5,
+                pady=2
+            )
+            label.pack()
+            
+            def hide_tooltip():
+                tooltip.destroy()
+            
+            widget.tooltip = tooltip
+            widget.after(3000, hide_tooltip)
+        
+        def hide_tooltip(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+        
+        widget.bind('<Enter>', show_tooltip)
+        widget.bind('<Leave>', hide_tooltip)
     
     def select_all_files(self):
         """Выбирает все файлы."""
@@ -652,7 +763,7 @@ class VelocityAnalysisWindow:
             return
         
         from view.main_window import UIPersistence
-        initial_dir = UIPersistence.get_last_dir() or self.results_dir
+        initial_dir = UIPersistence.get_last_dir() or str(self.current_dir)
         
         filename = filedialog.asksaveasfilename(
             title="Сохранить",

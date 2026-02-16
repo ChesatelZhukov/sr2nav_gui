@@ -1,5 +1,3 @@
-# Путь: view/dialogs.py
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -16,7 +14,7 @@ from view.themes import Theme
 from view.widgets import ModernButton
 
 # Импортируем UIPersistence для сохранения последней папки
-from view.persistence import UIPersistence  # НОВЫЙ ИМПОРТ
+from view.persistence import UIPersistence
 
 
 class GPSExclusionDialog:
@@ -208,36 +206,49 @@ class GPSExclusionDialog:
 
 
 class TransformFileDialog:
-    """Диалог выбора файлов для трансформации в TBL."""
+    """
+    Диалог выбора файлов для трансформации в TBL.
+    ИСПРАВЛЕНО: сканирование ТОЛЬКО после выбора папки
+    """
+    
+    # Типы файлов для трансформации
+    FILE_TYPES = [
+        ("Phase_L1.VEL", "ROVER_KIN", "📊 Фаза L1"),
+        ("Phase_IO.VEL", "ROVER_KIN", "📊 Фаза IO"),
+        ("PhaseIOS.VEL", "ROVER_KIN", "📊 Фаза IOS"),
+        ("PhaseL1S.VEL", "ROVER_KIN", "📊 Фаза L1S"),
+        ("Base_Std.QC", "BASE_STD", "🏠 Стандарт базы"),
+        ("Rover_Std.QC", "ROVER_STD", "🚙 Стандарт ровера"),
+    ]
     
     def __init__(
         self, 
         parent, 
-        results_dir: str, 
-        on_transform_callback: Callable[[List[str]], None]
+        initial_dir: str,
+        on_transform_callback: Callable[[List[str], str], None]
     ):
         """
         Args:
             parent: Родительское окно
-            results_dir: Путь к папке results
+            initial_dir: Начальная директория
             on_transform_callback: Функция для запуска трансформации
         """
         self.parent = parent
-        self.results_dir = Path(results_dir)
+        self.current_dir = Path(initial_dir)
         self.on_transform_callback = on_transform_callback
+        
         self._vars: Dict[str, tk.BooleanVar] = {}
         self._checkboxes: Dict[str, tk.Checkbutton] = {}
-        
-        # Обновляем последнюю папку при открытии диалога
-        UIPersistence.set_last_dir(str(self.results_dir))
+        self._file_paths: Dict[str, Path] = {}
         
         self._create_dialog()
+        # НЕ сканируем при создании
     
     def _create_dialog(self):
         """Создаёт диалоговое окно."""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Трансформация в TBL")
-        self.dialog.geometry("650x600")
+        self.dialog.geometry("750x650")
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
         self.dialog.configure(bg=Theme.BG_PRIMARY)
@@ -264,17 +275,107 @@ class TransformFileDialog:
             fg=Theme.FG_PRIMARY,
         ).pack(anchor="w", pady=(0, 10))
         
-        # Путь
+        # ============ СЕКЦИЯ ВЫБОРА ПАПКИ ============
+        source_frame = tk.Frame(main, bg=Theme.BG_PRIMARY)
+        source_frame.pack(fill=tk.X, pady=(0, 15))
+        
         tk.Label(
-            main,
-            text=f"📁 {self.results_dir}",
+            source_frame,
+            text="📂 Выберите папку с файлами:",
+            font=("Segoe UI", 10, "bold"),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
+        ).pack(anchor="w")
+        
+        dir_container = tk.Frame(source_frame, bg=Theme.BG_PRIMARY)
+        dir_container.pack(fill=tk.X, pady=(5, 0))
+        
+        self._dir_var = tk.StringVar(value=str(self.current_dir))
+        
+        self._dir_entry = tk.Entry(
+            dir_container,
+            textvariable=self._dir_var,
             font=("Consolas", 10),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
+            relief=tk.SOLID,
+            bd=1,
+            state='readonly',
+            readonlybackground=Theme.BG_SECONDARY,
+        )
+        self._dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        ModernButton(
+            dir_container,
+            text="📂 Выбрать папку...",
+            command=self._on_browse_source_dir,
+            width=15,
+            font=("Segoe UI", 10),
+            bg=Theme.ACCENT_BLUE,
+            fg="white",
+        ).pack(side=tk.RIGHT)
+        
+        # Информация о создаваемой папке tbl
+        self._tbl_info_label = tk.Label(
+            source_frame,
+            text="",
+            font=("Consolas", 9),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.ACCENT_GREEN,
+            anchor="w",
+        )
+        self._tbl_info_label.pack(anchor="w", pady=(5, 0))
+        
+        # Разделитель
+        tk.Frame(main, height=1, bg=Theme.BORDER).pack(fill=tk.X, pady=(0, 15))
+        
+        # Заголовок списка файлов
+        list_header = tk.Frame(main, bg=Theme.BG_PRIMARY)
+        list_header.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            list_header,
+            text="📋 Доступные файлы:",
+            font=("Segoe UI", 11, "bold"),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
+        ).pack(side=tk.LEFT)
+        
+        # Счетчик найденных файлов
+        self._file_count_label = tk.Label(
+            list_header,
+            text="(выберите папку)",
+            font=("Segoe UI", 10),
             bg=Theme.BG_PRIMARY,
             fg=Theme.FG_SECONDARY,
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 15))
+        )
+        self._file_count_label.pack(side=tk.LEFT, padx=(10, 0))
         
-        # Фрейм с прокруткой
+        # Кнопки управления списком
+        btn_frame = tk.Frame(list_header, bg=Theme.BG_PRIMARY)
+        btn_frame.pack(side=tk.RIGHT)
+        
+        ModernButton(
+            btn_frame,
+            text="✓ Все",
+            command=self._select_all,
+            width=5,
+            font=("Segoe UI", 9),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.LEFT, padx=2)
+        
+        ModernButton(
+            btn_frame,
+            text="✗ Сброс",
+            command=self._deselect_all,
+            width=5,
+            font=("Segoe UI", 9),
+            padx=8,
+            pady=2,
+        ).pack(side=tk.LEFT, padx=2)
+        
+        # Фрейм с прокруткой для файлов
         container = tk.Frame(main, bg=Theme.BG_PRIMARY)
         container.pack(fill=tk.BOTH, expand=True)
         
@@ -288,34 +389,159 @@ class TransformFileDialog:
             orient="vertical",
             command=canvas.yview,
         )
-        scrollable = tk.Frame(canvas, bg=Theme.BG_PRIMARY)
+        self.scrollable = tk.Frame(canvas, bg=Theme.BG_PRIMARY)
         
-        scrollable.bind(
+        self.scrollable.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
         
-        canvas.create_window((0, 0), window=scrollable, anchor="nw")
+        canvas.create_window((0, 0), window=self.scrollable, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # Список файлов
-        file_options = [
-            ("Phase_L1.VEL", "ROVER_KIN", "📊 Фаза L1"),
-            ("Phase_IO.VEL", "ROVER_KIN", "📊 Фаза IO"),
-            ("PhaseIOS.VEL", "ROVER_KIN", "📊 Фаза IOS"),
-            ("PhaseL1S.VEL", "ROVER_KIN", "📊 Фаза L1S"),
-            ("Base_Std.QC", "BASE_STD", "🏠 Стандарт базы"),
-            ("Rover_Std.QC", "ROVER_STD", "🚙 Стандарт ровера"),
-        ]
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         
-        for filename, _, description in file_options:
-            file_path = self.results_dir / filename
-            exists = file_path.exists()
+        # Текст-заглушка пока папка не выбрана
+        self._placeholder = tk.Label(
+            self.scrollable,
+            text="👆 Выберите папку для отображения файлов",
+            font=("Segoe UI", 12),
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_SECONDARY,
+        )
+        self._placeholder.pack(expand=True, pady=50)
+        
+        # Кнопки действий
+        btn_frame_bottom = tk.Frame(main, bg=Theme.BG_PRIMARY)
+        btn_frame_bottom.pack(fill=tk.X, pady=(20, 0))
+        
+        ModernButton(
+            btn_frame_bottom,
+            text="🔄 Обновить список",
+            command=self._refresh_file_list,
+            width=15,
+            font=("Segoe UI", 10),
+            bg=Theme.ACCENT_BLUE,
+            fg="white",
+        ).pack(side="left", padx=(0, 5))
+        
+        ModernButton(
+            btn_frame_bottom,
+            text="❌ Закрыть",
+            command=self._on_close,
+            width=10,
+            font=("Segoe UI", 10),
+        ).pack(side="right", padx=(5, 0))
+        
+        ModernButton(
+            btn_frame_bottom,
+            text="🔄 Трансформировать",
+            bg=Theme.ACCENT_GREEN,
+            fg="white",
+            command=self._on_transform,
+            width=18,
+            font=("Segoe UI", 10, "bold"),
+            padx=16,
+            pady=6,
+        ).pack(side="right", padx=(0, 5))
+    
+    def _on_browse_source_dir(self):
+        """Открывает диалог выбора папки и сразу сканирует её."""
+        initial_dir = str(self.current_dir)
+        if not os.path.exists(initial_dir):
+            initial_dir = UIPersistence.get_last_dir()
+        
+        directory = filedialog.askdirectory(
+            title="Выберите папку с файлами",
+            initialdir=initial_dir,
+        )
+        
+        if directory:
+            self.current_dir = Path(directory)
+            self._dir_var.set(str(self.current_dir))
+            self._update_tbl_info()
+            self._refresh_file_list()  # Сканируем ТОЛЬКО после выбора
+            UIPersistence.set_last_dir(directory)
+    
+    def _update_tbl_info(self):
+        """Обновляет информацию о папке tbl."""
+        tbl_path = self.current_dir / "tbl"
+        self._tbl_info_label.config(
+            text=f"📁 Папка 'tbl' будет создана: {tbl_path}",
+            fg=Theme.ACCENT_GREEN
+        )
+    
+    def _find_files_in_current_dir(self) -> Dict[str, Path]:
+        """Ищет файлы в текущей папке."""
+        found_files = {}
+        
+        if not self.current_dir.exists():
+            return found_files
+        
+        try:
+            files_in_dir = {f.name for f in self.current_dir.iterdir() if f.is_file()}
+        except Exception:
+            return found_files
+        
+        for filename, _, _ in self.FILE_TYPES:
+            if filename in files_in_dir:
+                found_files[filename] = self.current_dir / filename
+        
+        return found_files
+    
+    def _refresh_file_list(self):
+        """Обновляет список файлов из текущей папки."""
+        # Убираем заглушку
+        if hasattr(self, '_placeholder') and self._placeholder:
+            self._placeholder.destroy()
+            self._placeholder = None
+        
+        # Очищаем старые виджеты
+        for widget in self.scrollable.winfo_children():
+            widget.destroy()
+        
+        self._vars.clear()
+        self._checkboxes.clear()
+        self._file_paths.clear()
+        
+        if not self.current_dir.exists():
+            tk.Label(
+                self.scrollable,
+                text=f"❌ Папка не существует",
+                font=("Segoe UI", 12),
+                bg=Theme.BG_PRIMARY,
+                fg=Theme.ERROR,
+            ).pack(expand=True, pady=50)
+            self._file_count_label.config(text="(папка не найдена)")
+            return
+        
+        # Обновляем информацию о tbl
+        self._update_tbl_info()
+        
+        # Ищем файлы
+        self._file_paths = self._find_files_in_current_dir()
+        
+        if not self._file_paths:
+            # Показываем что файлы не найдены
+            tk.Label(
+                self.scrollable,
+                text="❌ В папке нет нужных файлов",
+                font=("Segoe UI", 12),
+                bg=Theme.BG_PRIMARY,
+                fg=Theme.WARNING,
+            ).pack(expand=True, pady=50)
+            self._file_count_label.config(text="(0 файлов)")
+            return
+        
+        # Показываем найденные файлы
+        for filename, file_path in sorted(self._file_paths.items()):
+            description = next((desc for f, _, desc in self.FILE_TYPES if f == filename), filename)
             
-            var = tk.BooleanVar(value=exists and filename == "Phase_L1.VEL")
+            var = tk.BooleanVar(value=True)
             self._vars[filename] = var
             
-            row = tk.Frame(scrollable, bg=Theme.BG_PRIMARY)
+            row = tk.Frame(self.scrollable, bg=Theme.BG_PRIMARY)
             row.pack(fill=tk.X, pady=4)
             
             # Чекбокс
@@ -325,8 +551,7 @@ class TransformFileDialog:
                 bg=Theme.BG_PRIMARY,
                 fg=Theme.FG_PRIMARY,
                 activebackground=Theme.HOVER,
-                selectcolor="white" if exists else Theme.BG_PRIMARY,
-                state="normal" if exists else "disabled",
+                selectcolor="white",
                 font=("Segoe UI", 11),
             )
             cb.pack(side="left")
@@ -339,9 +564,9 @@ class TransformFileDialog:
             tk.Label(
                 info,
                 text=description,
-                font=("Segoe UI", 11, "bold" if exists else "normal"),
+                font=("Segoe UI", 11, "bold"),
                 bg=Theme.BG_PRIMARY,
-                fg=Theme.FG_PRIMARY if exists else Theme.FG_DISABLED,
+                fg=Theme.FG_PRIMARY,
                 anchor="w",
             ).pack(anchor="w")
             
@@ -350,84 +575,35 @@ class TransformFileDialog:
                 text=filename,
                 font=("Consolas", 9),
                 bg=Theme.BG_PRIMARY,
-                fg=Theme.FG_SECONDARY if exists else Theme.FG_DISABLED,
+                fg=Theme.FG_SECONDARY,
                 anchor="w",
             ).pack(anchor="w")
             
-            status_color = Theme.SUCCESS if exists else Theme.FG_DISABLED
-            status_text = "✓ Доступен" if exists else "✗ Не найден"
+            size = file_path.stat().st_size
+            size_str = f"{size / 1024:.0f} KB" if size < 1024*1024 else f"{size / 1024 / 1024:.1f} MB"
             
             tk.Label(
                 info,
-                text=status_text,
+                text=f"✓ {size_str}",
                 font=("Segoe UI", 9),
                 bg=Theme.BG_PRIMARY,
-                fg=status_color,
+                fg=Theme.SUCCESS,
             ).pack(anchor="w")
         
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Кнопки
-        btn_frame = tk.Frame(main, bg=Theme.BG_PRIMARY)
-        btn_frame.pack(fill=tk.X, pady=(20, 0))
-        
-        ModernButton(
-            btn_frame,
-            text="✓ Выбрать все",
-            command=self._select_all,
-            width=12,
-            font=("Segoe UI", 10),
-            padx=12,
-            pady=6,
-        ).pack(side="left", padx=(0, 5))
-        
-        ModernButton(
-            btn_frame,
-            text="✗ Сбросить все",
-            command=self._deselect_all,
-            width=12,
-            font=("Segoe UI", 10),
-            padx=12,
-            pady=6,
-        ).pack(side="left")
-        
-        ModernButton(
-            btn_frame,
-            text="❌ Закрыть",
-            command=self._on_close,
-            width=10,
-            font=("Segoe UI", 10),
-            padx=12,
-            pady=6,
-        ).pack(side="right", padx=(5, 0))
-        
-        ModernButton(
-            btn_frame,
-            text="🔄 Трансформировать",
-            bg=Theme.ACCENT_GREEN,
-            fg="white",
-            command=self._on_transform,
-            width=18,
-            font=("Segoe UI", 10, "bold"),
-            padx=16,
-            pady=6,
-        ).pack(side="right", padx=(0, 5))
+        self._file_count_label.config(text=f"({len(self._file_paths)} файлов)")
     
     def _select_all(self):
-        """Выбирает все доступные файлы."""
-        for filename, var in self._vars.items():
-            cb = self._checkboxes.get(filename)
-            if cb and cb.cget("state") == "normal":
-                var.set(True)
+        """Выбирает все файлы."""
+        for var in self._vars.values():
+            var.set(True)
     
     def _deselect_all(self):
-        """Сбрасывает выбор всех файлов."""
+        """Сбрасывает выбор."""
         for var in self._vars.values():
             var.set(False)
     
     def _on_transform(self):
-        """Запускает трансформацию через контроллер."""
+        """Запускает трансформацию."""
         selected = [
             f for f, var in self._vars.items()
             if var.get()
@@ -441,7 +617,15 @@ class TransformFileDialog:
             )
             return
         
-        self.on_transform_callback(selected)  # Вызов контроллера!
+        if not self.current_dir.exists():
+            messagebox.showerror(
+                "Ошибка",
+                f"Папка не существует",
+                parent=self.dialog
+            )
+            return
+        
+        self.on_transform_callback(selected, str(self.current_dir))
         self._on_close()
     
     def _on_close(self):

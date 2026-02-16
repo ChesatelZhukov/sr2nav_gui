@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ЧИСТАЯ МОДЕЛЬ - Трансформация файлов в формат TBL.
-ТОЛЬКО ФАЙЛОВЫЕ ОПЕРАЦИИ, НИКАКОГО UI!
+ИСПРАВЛЕНО: поддержка пользовательской целевой директории.
 """
 from enum import Enum
 from pathlib import Path
@@ -45,7 +45,7 @@ class FileTransformer:
     Никакого UI, только файловые операции!
     """
     
-    # Конфигурация трансформации
+    # Конфигурация трансформации (без изменений)
     CONFIG = {
         TransformerFileType.ROVER_KIN: {
             'remove_lines': 2,
@@ -130,7 +130,7 @@ class FileTransformer:
         
         Args:
             src: Исходный файл
-            dst: Выходной файл (.tbl)
+            dst: Выходной файл (.tbl) - ПОЛНЫЙ ПУТЬ, включая директорию
             file_type: Тип файла
             
         Returns:
@@ -146,7 +146,7 @@ class FileTransformer:
                 return False
             
             self._send_message(AppMessage.info(
-                f"🔄 Трансформация: {src.name} → {dst.name}",
+                f"🔄 Трансформация: {src.name} → {dst}",
                 source="FileTransformer"
             ))
             
@@ -173,7 +173,7 @@ class FileTransformer:
                     shutil.copyfileobj(f_src, tmp)
             
             # Перемещаем временный файл в целевой
-            dst.parent.mkdir(exist_ok=True)
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(temp_path), str(dst))
             
             self._send_message(AppMessage.info(

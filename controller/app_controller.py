@@ -47,10 +47,7 @@ class ApplicationController:
         
         # MODEL - чистая бизнес-логика
         self._file_manager = FileManager(APP_CONTEXT, self._publish_message)
-        
-        # ИСПРАВЛЕНО: передаём функцию, принимающую AppMessage
-        self._process_runner = ProcessRunner(self._publish_message)  # Прямая передача
-        
+        self._process_runner = ProcessRunner(self._publish_message)
         self._gps_excluder = GPSExcluder(APP_CONTEXT)
         self._file_transformer = FileTransformer(self._publish_message)
         self._velocity_analyzer = VelocityAnalyzer()
@@ -124,7 +121,21 @@ class ApplicationController:
         """Выбор файла пользователем."""
         try:
             file_type = FileType(file_key)
-            self._file_manager.set_path(file_type, path)
+            
+            # ОСОБАЯ ОБРАБОТКА ДЛЯ РОВЕРА
+            if file_type == FileType.ROVER:
+                self._file_manager.set_rover_path(path)
+                # Обновляем заголовок окна
+                if self._window and path:
+                    rover_name = Path(path).stem
+                    self._window.update_window_title(rover_name)
+                    self._publish_message(AppMessage.info(
+                        f"📁 Папка результатов: {APP_CONTEXT.results_dir.name}",
+                        source="Controller"
+                    ))
+            else:
+                self._file_manager.set_path(file_type, path)
+            
             self._publish_message(AppMessage.debug(
                 f"Установлен путь: {file_type.description}",
                 source="Controller"
@@ -136,14 +147,7 @@ class ApplicationController:
             ))
     
     def on_stitch_jps(self, input_files: list, output_path: str, target_key: str = "rover") -> None:
-        """
-        Сшивание JPS файлов.
-        
-        Args:
-            input_files: Список входных файлов
-            output_path: Путь к выходному файлу
-            target_key: Ключ файла, в который подставить результат (rover/base1/base2)
-        """
+        """Сшивание JPS файлов."""
         # Валидация
         for file_path in input_files:
             if not os.path.exists(file_path):
@@ -160,9 +164,20 @@ class ApplicationController:
         if success:
             self._publish_message(AppMessage.info(message, source="Controller"))
             
-            # ИСПРАВЛЕНО: автоматически подставляем путь в соответствующий виджет
             if target_key in ["rover", "base1", "base2"]:
                 self._window.set_file_path(target_key, output_path)
+                
+                # ЕСЛИ ЭТО РОВЕР - ОБНОВЛЯЕМ ПАПКУ РЕЗУЛЬТАТОВ
+                if target_key == "rover":
+                    self._file_manager.set_rover_path(output_path)
+                    rover_name = Path(output_path).stem
+                    if self._window:
+                        self._window.update_window_title(rover_name)
+                    self._publish_message(AppMessage.info(
+                        f"📁 Папка результатов: {APP_CONTEXT.results_dir.name}",
+                        source="Controller"
+                    ))
+                
                 self._publish_message(AppMessage.info(
                     f"📌 Сшитый файл установлен в поле '{target_key}'",
                     source="Controller"
@@ -206,6 +221,56 @@ class ApplicationController:
         
         sys.exit(0)
     
+    def on_cleanup_working_directory(self) -> None:
+        """
+        Очистка рабочей директории от временных файлов.
+        Не трогает папки, .exe и .py файлы.
+        """
+        async def _run():
+            # Подтверждение от пользователя
+            if self._window:
+                from tkinter import messagebox
+                result = messagebox.askyesno(
+                    "🧹 Очистка рабочей директории",
+                    "Это удалит ВСЕ ФАЙЛЫ (кроме .exe и .py) из рабочей директории.\n\n"
+                    "Папки (results, tbl и др.) не будут затронуты.\n\n"
+                    "Продолжить?",
+                    parent=self._window.window,
+                    icon='warning'
+                )
+                
+                if not result:
+                    self._publish_message(AppMessage.info(
+                        "Очистка отменена пользователем",
+                        source="Controller"
+                    ))
+                    return
+            
+            self._publish_message(AppMessage.info(
+                "🧹 Начинаю очистку рабочей директории...",
+                source="Controller"
+            ))
+            
+            # Вызываем метод модели
+            deleted_count, errors = self._file_manager.cleanup_working_directory()
+            
+            # Итоговое сообщение
+            if errors:
+                self._publish_message(AppMessage.warning(
+                    f"⚠️ Очистка завершена с {len(errors)} ошибками. "
+                    f"Удалено файлов: {deleted_count}",
+                    source="Controller"
+                ))
+            else:
+                self._publish_message(AppMessage.info(
+                    f"✅ Рабочая директория очищена. Удалено файлов: {deleted_count}",
+                    source="Controller"
+                ))
+        
+        self._run_async(_run())
+
+
+
     # ==================== ЗАПУСК ПРОЦЕССОВ ====================
     
     def on_run_interval(self) -> None:
@@ -305,7 +370,11 @@ class ApplicationController:
                     "✅ SR2Nav успешно завершён",
                     source="Controller"
                 ))
-                self._file_manager.move_results_to_results_dir()
+                moved = self._file_manager.move_results_to_results_dir()
+                self._publish_message(AppMessage.info(
+                    f"📁 Результаты ({moved} файлов) сохранены в: {APP_CONTEXT.results_dir.name}",
+                    source="Controller"
+                ))
             else:
                 self._publish_message(AppMessage.warning(
                     f"⚠️ SR2Nav завершён с кодом: {return_code}",
@@ -386,7 +455,11 @@ class ApplicationController:
             )
             
             if return_code == 0:
-                self._file_manager.move_results_to_results_dir()
+                moved = self._file_manager.move_results_to_results_dir()
+                self._publish_message(AppMessage.info(
+                    f"📁 Результаты ({moved} файлов) сохранены в: {APP_CONTEXT.results_dir.name}",
+                    source="Controller"
+                ))
             
             self._window.set_processing_state(False)
             self._sync_paths_to_ui()
@@ -420,25 +493,17 @@ class ApplicationController:
         if not self._window:
             return
         
-        # 1. Получаем текущие исключённые спутники из Model
         current_excluded = self._gps_excluder.load_excluded()
-        
-        # 2. Создаём View с callback на сохранение
         dialog = GPSExclusionDialog(
             self._window.window,
             current_excluded,
-            self._on_gps_exclusion_saved  # Callback в контроллер
+            self._on_gps_exclusion_saved
         )
-        
-        # 3. Показываем диалог
         dialog.show()
     
     def _on_gps_exclusion_saved(self, excluded: Set[str]) -> None:
         """Callback сохранения исключённых спутников."""
-        # Сохраняем в Model
         success = self._gps_excluder.save_excluded(excluded)
-        
-        # Обновляем View
         if success:
             count = len(excluded)
             if count == 0:
@@ -460,32 +525,82 @@ class ApplicationController:
         dialog = TransformFileDialog(
             self._window.window,
             str(APP_CONTEXT.results_dir),
-            self._on_transform_files  # Callback в контроллер
+            self.on_transform_files
         )
         dialog.show()
     
-    def _on_transform_files(self, filenames: List[str]) -> None:
-        """Callback трансформации файлов."""
+    def on_transform_files(self, filenames: List[str], source_dir: str) -> None:
+        """
+        Callback трансформации файлов.
+        ИСПРАВЛЕНО: правильный поиск файлов в подпапках
+        """
         async def _run():
+            source_path = Path(source_dir)
+            
+            # Создаем папку tbl внутри исходной директории
+            tbl_dir = source_path / "tbl"
+            tbl_dir.mkdir(parents=True, exist_ok=True)
+            
+            self._publish_message(AppMessage.info(
+                f"📁 Исходная папка: {source_path}",
+                source="Controller"
+            ))
+            self._publish_message(AppMessage.info(
+                f"📁 TBL файлы будут сохранены в: {tbl_dir}",
+                source="Controller"
+            ))
+            
+            # Ищем файлы рекурсивно
+            files_found = 0
+            files_transformed = 0
+            
             for filename in filenames:
-                src = APP_CONTEXT.results_dir / filename
-                dst = APP_CONTEXT.tbl_dir / f"{src.stem}.tbl"
-                
-                if not src.exists():
-                    self._publish_message(AppMessage.error(
-                        f"Файл не найден: {filename}",
-                        source="Controller"
-                    ))
-                    continue
-                
-                file_type = self._file_transformer.detect_file_type(filename)
-                if file_type:
-                    success = await self._file_transformer.transform(src, dst, file_type)
-                    if success:
+                # Ищем файл во всех подпапках
+                found = False
+                for root, dirs, files in os.walk(str(source_path)):
+                    if filename in files:
+                        src = Path(root) / filename
+                        dst = tbl_dir / f"{Path(filename).stem}.tbl"
+                        
                         self._publish_message(AppMessage.info(
-                            f"✓ {filename} → {dst.name}",
+                            f"🔍 Найден: {src}",
                             source="Controller"
                         ))
+                        
+                        files_found += 1
+                        file_type = self._file_transformer.detect_file_type(filename)
+                        
+                        if file_type:
+                            success = await self._file_transformer.transform(src, dst, file_type)
+                            if success:
+                                files_transformed += 1
+                                self._publish_message(AppMessage.info(
+                                    f"✓ {filename} → {dst.name}",
+                                    source="Controller"
+                                ))
+                        
+                        found = True
+                        break  # Берём первый найденный файл
+                
+                if not found:
+                    self._publish_message(AppMessage.warning(
+                        f"⚠️ Файл не найден: {filename}",
+                        source="Controller"
+                    ))
+            
+            # Итоговое сообщение
+            if files_transformed > 0:
+                self._publish_message(AppMessage.info(
+                    f"✅ Трансформация завершена. "
+                    f"Преобразовано {files_transformed} из {files_found} файлов. "
+                    f"Сохранено в: {tbl_dir}",
+                    source="Controller"
+                ))
+            else:
+                self._publish_message(AppMessage.warning(
+                    f"⚠️ Ни один файл не был преобразован",
+                    source="Controller"
+                ))
         
         self._run_async(_run())
     
@@ -496,45 +611,79 @@ class ApplicationController:
         if not self._window:
             return
         
-        # Проверяем существование папки results
         if not APP_CONTEXT.results_dir.exists():
             self._publish_message(AppMessage.error(
-                f"Папка results не найдена: {APP_CONTEXT.results_dir}",
+                f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}",
                 source="Controller"
             ))
             return
         
-        # Создаём окно анализа (View)
-        # Оно само запросит данные через request_velocity_analysis()
         VelocityAnalysisWindow(self._window.window, self)
     
     def request_velocity_analysis(self, window: VelocityAnalysisWindow) -> None:
-        """
-        Обработка запроса от окна анализа скоростей.
-        Выполняется асинхронно, чтобы не блокировать UI.
-        """
+        """Обработка запроса от окна анализа скоростей."""
         async def _run():
-            # 1. Анализ данных (Model)
-            results = self._velocity_analyzer.analyze_all(str(APP_CONTEXT.results_dir))
-            
-            # 2. Получение сводной статистики (Model)
-            summary = self._velocity_analyzer.get_summary_statistics()
-            
-            # 3. Преобразование данных для View
-            view_results = self._prepare_velocity_results_for_view(results)
-            
-            # 4. Обновление View (в главном потоке Tkinter)
-            self._window.window.after(0, lambda: window.update_results(view_results, summary))
+            try:
+                # ИСПРАВЛЕНИЕ: Используем путь из окна, если он есть
+                if hasattr(window, 'current_dir') and window.current_dir:
+                    folder_path = str(window.current_dir)
+                    self._publish_message(AppMessage.info(
+                        f"🔍 Анализ скоростей в папке: {folder_path}",
+                        source="Controller"
+                    ))
+                else:
+                    folder_path = str(APP_CONTEXT.results_dir)
+                    self._publish_message(AppMessage.info(
+                        f"🔍 Анализ скоростей в папке результатов: {APP_CONTEXT.results_dir.name}",
+                        source="Controller"
+                    ))
+                
+                # Проверяем существование папки
+                if not os.path.exists(folder_path):
+                    self._publish_message(AppMessage.error(
+                        f"Папка не найдена: {folder_path}",
+                        source="Controller"
+                    ))
+                    self._window.window.after(0, lambda: window.show_error(f"Папка не найдена:\n{folder_path}"))
+                    return
+                
+                # Выполняем анализ
+                results = self._velocity_analyzer.analyze_all(folder_path)
+                
+                if not results:
+                    self._publish_message(AppMessage.warning(
+                        f"В папке {folder_path} не найдено VEL файлов",
+                        source="Controller"
+                    ))
+                    self._window.window.after(0, lambda: window.show_error("VEL файлы не найдены"))
+                    return
+                
+                # Получаем сводную статистику
+                summary = self._velocity_analyzer.get_summary_statistics()
+                
+                # Преобразуем результаты для отображения
+                view_results = self._prepare_velocity_results_for_view(results)
+                
+                # Обновляем UI в главном потоке
+                self._window.window.after(0, lambda: window.update_results(view_results, summary))
+                
+                self._publish_message(AppMessage.success(
+                    f"✅ Анализ скоростей завершен. Найдено файлов: {len(results)}",
+                    source="Controller"
+                ))
+                
+            except Exception as e:
+                error_msg = f"Ошибка анализа скоростей: {str(e)}"
+                self._publish_message(AppMessage.error(error_msg, source="Controller"))
+                import traceback
+                traceback.print_exc()
+                self._window.window.after(0, lambda: window.show_error(error_msg))
         
         self._run_async(_run())
     
     def _prepare_velocity_results_for_view(self, results: Dict) -> Dict:
-        """
-        Преобразует результаты Model в формат для View.
-        View не должно знать о структуре Model!
-        """
+        """Преобразует результаты Model в формат для View."""
         view_results = {}
-        
         for filename, result in results.items():
             view_results[filename] = {
                 'data': {
@@ -562,7 +711,6 @@ class ApplicationController:
                     'mean_speed_3d': result.statistics.mean_speed_3d,
                 }
             }
-        
         return view_results
     
     def export_velocity_analysis(self, output_file: str) -> bool:
@@ -576,41 +724,74 @@ class ApplicationController:
         
         if not APP_CONTEXT.results_dir.exists():
             self._publish_message(AppMessage.error(
-                f"Папка results не найдена: {APP_CONTEXT.results_dir}",
+                f"Папка {APP_CONTEXT.results_dir.name} не найдена: {APP_CONTEXT.results_dir}",
                 source="Controller"
             ))
             return
         
-        # Создаём окно анализа (View)
         GPSAnalysisWindow(self._window.window, self)
     
     def request_gps_analysis(self, window: GPSAnalysisWindow) -> None:
+        """Обработка запроса от окна анализа GPS."""
         async def _run():
             try:
-                results = self._gps_analyzer.analyze_all(str(APP_CONTEXT.results_dir))
-                # Проверка на пустой результат
-                if not results:
-                    self._window.window.after(0, lambda: window.show_error("Анализатор не вернул данных. Файлы .SVs не найдены или пусты."))
+                # ИСПРАВЛЕНИЕ: Используем путь из окна, если он есть
+                if hasattr(window, 'current_dir') and window.current_dir:
+                    folder_path = str(window.current_dir)
+                    self._publish_message(AppMessage.info(
+                        f"🔍 Анализ GPS созвездия в папке: {folder_path}",
+                        source="Controller"
+                    ))
+                else:
+                    folder_path = str(APP_CONTEXT.results_dir)
+                    self._publish_message(AppMessage.info(
+                        f"🔍 Анализ GPS созвездия в папке результатов: {APP_CONTEXT.results_dir.name}",
+                        source="Controller"
+                    ))
+                
+                # Проверяем существование папки
+                if not os.path.exists(folder_path):
+                    self._publish_message(AppMessage.error(
+                        f"Папка не найдена: {folder_path}",
+                        source="Controller"
+                    ))
+                    self._window.window.after(0, lambda: window.show_error(f"Папка не найдена:\n{folder_path}"))
                     return
                 
+                # Выполняем анализ
+                results = self._gps_analyzer.analyze_all(folder_path)
+                
+                if not results:
+                    self._publish_message(AppMessage.warning(
+                        f"В папке {folder_path} не найдено SVs файлов",
+                        source="Controller"
+                    ))
+                    self._window.window.after(0, lambda: window.show_error("Файлы .SVs не найдены"))
+                    return
+                
+                # Преобразуем результаты для отображения
                 view_results = self._prepare_gps_results_for_view(results)
+                
+                # Обновляем UI в главном потоке
                 self._window.window.after(0, lambda: window.update_results(view_results))
                 
+                self._publish_message(AppMessage.success(
+                    f"✅ Анализ GPS завершен. Найдено файлов: {len(results)}",
+                    source="Controller"
+                ))
+                
             except Exception as e:
-                error_msg = f"Ошибка анализа GPS созвездия: {str(e)}"
+                error_msg = f"Ошибка анализа GPS: {str(e)}"
                 self._publish_message(AppMessage.error(error_msg, source="Controller"))
-                # ВАЖНО: передаем управление в окно, чтобы оно скрыло загрузку и показало ошибку
+                import traceback
+                traceback.print_exc()
                 self._window.window.after(0, lambda: window.show_error(error_msg))
         
         self._run_async(_run())
     
     def _prepare_gps_results_for_view(self, results: Dict) -> Dict:
-        """
-        Преобразует результаты GPS анализа в формат для View.
-        ИСПРАВЛЕНО: добавлено intervals_per_minute!
-        """
+        """Преобразует результаты GPS анализа в формат для View."""
         view_results = {}
-        
         for filename, result in results.items():
             satellite_stats = {}
             for sat, stats in result.satellite_stats.items():
@@ -626,17 +807,14 @@ class ApplicationController:
                     'stability_category': stats.stability_category,
                     'warning_message': stats.warning_message,
                     'is_problematic': stats.is_problematic,
-                    'intervals_per_minute': stats.intervals_per_minute,  # <-- ЭТО БЫЛО ПОТЕРЯНО!
+                    'intervals_per_minute': stats.intervals_per_minute,
                     'intervals': [
                         {'start': i.start, 'end': i.end, 'duration': i.duration}
                         for i in stats.intervals
                     ]
                 }
             
-            
-            # Добавляем сводный отчет
             summary = result.summary_report
-            
             view_results[filename] = {
                 'data': {
                     'filename': result.data.filename,
@@ -670,7 +848,6 @@ class ApplicationController:
                 },
                 'summary': summary
             }
-        
         return view_results
     
     def export_gps_analysis(self, output_file: str) -> bool:
@@ -688,7 +865,10 @@ class ApplicationController:
         for key, path in paths.items():
             try:
                 file_type = FileType(key)
-                self._file_manager.set_path(file_type, path)
+                if file_type == FileType.ROVER:
+                    self._file_manager.set_rover_path(path)
+                else:
+                    self._file_manager.set_path(file_type, path)
             except ValueError:
                 pass
     

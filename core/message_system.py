@@ -14,6 +14,7 @@ class MessageLevel(Enum):
     """Уровни сообщений с визуальным приоритетом."""
     DEBUG = auto()
     INFO = auto()
+    SUCCESS = auto()  # ДОБАВИТЬ
     WARNING = auto()
     ERROR = auto()
     
@@ -23,6 +24,7 @@ class MessageLevel(Enum):
         return {
             MessageLevel.DEBUG: "🐛 DEBUG",
             MessageLevel.INFO: "ℹ️ INFO",
+            MessageLevel.SUCCESS: "✅ SUCCESS",  # ДОБАВИТЬ
             MessageLevel.WARNING: "⚠️ WARNING",
             MessageLevel.ERROR: "❌ ERROR",
         }[self]
@@ -38,9 +40,16 @@ class MessageLevel(Enum):
         return {
             MessageLevel.DEBUG: "debug",
             MessageLevel.INFO: "info",
+            MessageLevel.SUCCESS: "success",  # ДОБАВИТЬ
             MessageLevel.WARNING: "warning",
             MessageLevel.ERROR: "error",
         }[self]
+
+# Добавить фабричный метод
+@classmethod
+def success(cls, text: str, source: str = None) -> 'AppMessage':
+    """Создаёт сообщение об успехе."""
+    return cls(text, MessageLevel.SUCCESS, source=source)
 
 
 @dataclass(frozen=True)
@@ -57,7 +66,12 @@ class AppMessage:
     def __post_init__(self):
         if self.timestamp is None:
             object.__setattr__(self, 'timestamp', datetime.now())
-    
+
+    @classmethod
+    def success(cls, text: str, source: str = None) -> 'AppMessage':
+        """Создаёт сообщение об успехе."""
+        return cls(text, MessageLevel.SUCCESS, source=source)
+
     @classmethod
     def info(cls, text: str, source: str = None) -> 'AppMessage':
         """Создаёт информационное сообщение."""

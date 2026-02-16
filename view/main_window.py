@@ -61,9 +61,9 @@ class MainWindow:
         self._TAGS = {
             'debug': Theme.DEBUG,
             'info': Theme.INFO,
+            'success': Theme.SUCCESS,  # ДОБАВИТЬ
             'warning': Theme.WARNING,
             'error': Theme.ERROR,
-            'success': Theme.SUCCESS,
             'header': Theme.ACCENT_BLUE,
         }
     
@@ -263,6 +263,12 @@ class MainWindow:
         tools_menu.add_command(
             label="🚫 Исключение спутников",
             command=self._controller.on_show_gps_exclusion_dialog
+        )
+        # НОВЫЙ ПУНКТ МЕНЮ
+        tools_menu.add_separator()
+        tools_menu.add_command(
+            label="🧹 Очистить рабочую директорию",
+            command=self._controller.on_cleanup_working_directory
         )
         
         # Вид
@@ -712,13 +718,18 @@ class MainWindow:
     
     def _on_show_transform_dialog(self) -> None:
         """Показывает диалог трансформации файлов."""
-        from core.app_context import APP_CONTEXT
         from view.dialogs import TransformFileDialog
+        
+        # Используем последнюю использованную папку или рабочую директорию
+        initial_dir = UIPersistence.get_last_dir()
+        if not initial_dir:
+            from core.app_context import APP_CONTEXT
+            initial_dir = str(APP_CONTEXT.working_dir)
         
         dialog = TransformFileDialog(
             self._root,
-            str(APP_CONTEXT.results_dir),
-            self._controller.on_transform_files,  # <- Добавить подчеркивание
+            initial_dir,
+            self._controller.on_transform_files,
         )
         dialog.show()
     

@@ -10,11 +10,14 @@ from pathlib import Path
 
 # Скрываем консольное окно при запуске GUI
 if sys.platform == 'win32' and not getattr(sys, 'frozen', False):
-    import ctypes
     try:
-        # Скрываем окно консоли
-        ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
-    except:
+        import ctypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+    except Exception:
         pass
 
 # Добавляем корневую директорию в PATH для корректного импорта при компиляции

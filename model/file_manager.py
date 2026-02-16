@@ -142,6 +142,31 @@ class FileManager:
         if path_obj.parent == self._ctx.working_dir:
             self._working_paths[file_type] = path_obj
     
+    # ============ НОВЫЙ СПЕЦИАЛИЗИРОВАННЫЙ МЕТОД ДЛЯ РОВЕРА ============
+    
+    def set_rover_path(self, path: str | Path) -> None:
+        """
+        Устанавливает путь к роверу и обновляет папку результатов.
+        """
+        if not path:
+            self._original_paths.pop(FileType.ROVER, None)
+            self._working_paths.pop(FileType.ROVER, None)
+            return
+        
+        path_obj = Path(path)
+        self._original_paths[FileType.ROVER] = path_obj
+        
+        if path_obj.parent == self._ctx.working_dir:
+            self._working_paths[FileType.ROVER] = path_obj
+        
+        # ДОБАВЛЯЕМ ПРОВЕРКУ - path точно не None здесь
+        if str(path).strip():  # <-- дополнительная проверка
+            new_dir = self._ctx.set_results_dir_from_rover(str(path))
+            self._send_message(AppMessage.info(
+                f"📁 Папка результатов: {new_dir.name}",
+                source="FileManager"
+            ))
+    
     def get_path(self, file_type: FileType) -> Optional[Path]:
         """Возвращает путь к файлу в рабочей директории (если есть)."""
         return self._working_paths.get(file_type)
@@ -196,7 +221,7 @@ class FileManager:
     
     def cleanup_results_dir(self, force: bool = False) -> Tuple[int, bool]:
         """
-        ОЧИЩАЕТ ПАПКУ RESULTS перед запуском.
+        ОЧИЩАЕТ ПАПКУ РЕЗУЛЬТАТОВ перед запуском.
         
         Args:
             force: Если False, проверяет наличие файлов и отправляет предупреждение
@@ -208,18 +233,20 @@ class FileManager:
         deleted = 0
         existing_files = []
         
-        if not self._ctx.results_dir.exists():
-            self._ctx.results_dir.mkdir(parents=True, exist_ok=True)
+        results_dir = self._ctx.results_dir
+        
+        if not results_dir.exists():
+            results_dir.mkdir(parents=True, exist_ok=True)
             return 0, False
         
         # Собираем список существующих файлов
         for pattern in patterns:
-            existing_files.extend(list(self._ctx.results_dir.glob(pattern)))
+            existing_files.extend(list(results_dir.glob(pattern)))
         
         # Если есть файлы и не форсируем - запрашиваем подтверждение
         if existing_files and not force:
             self._send_message(AppMessage.warning(
-                f"⚠️ В папке results найдены файлы ({len(existing_files)} шт.)\n"
+                f"⚠️ В папке {results_dir.name} найдены файлы ({len(existing_files)} шт.)\n"
                 f"Очистка удалит их перед запуском.",
                 source="FileManager"
             ))
@@ -227,7 +254,7 @@ class FileManager:
         
         # Удаляем файлы
         for pattern in patterns:
-            for file_path in self._ctx.results_dir.glob(pattern):
+            for file_path in results_dir.glob(pattern):
                 try:
                     file_path.unlink()
                     deleted += 1
@@ -591,23 +618,27 @@ class FileManager:
     # ==================== ПЕРЕМЕЩЕНИЕ РЕЗУЛЬТАТОВ ====================
     
     def move_results_to_results_dir(self) -> int:
-        """Перемещает результаты работы SR2Nav в папку results."""
+        """Перемещает результаты работы SR2Nav в папку результатов."""
         patterns = self.RESULT_FILE_PATTERNS
+        results_dir = self._ctx.results_dir
         
-        # Создаём папку results, если её нет
-        self._ctx.results_dir.mkdir(parents=True, exist_ok=True)
+        # Создаём папку, если её нет
+        results_dir.mkdir(parents=True, exist_ok=True)
         
         moved = 0
         
         for pattern in patterns:
             for file_path in self._ctx.working_dir.glob(pattern):
                 if file_path.is_file():
-                    dest = self._ctx.results_dir / file_path.name
+                    dest = results_dir / file_path.name
                     try:
+                        # Если файл уже существует - перезаписываем
+                        if dest.exists():
+                            dest.unlink()
                         shutil.move(str(file_path), str(dest))
                         moved += 1
                         self._send_message(AppMessage.debug(
-                            f"📦 {file_path.name} → results/",
+                            f"📦 {file_path.name} → {results_dir.name}/",
                             source="FileManager"
                         ))
                     except Exception as e:
@@ -667,3 +698,81 @@ class FileManager:
         """Отправляет сообщение через callback."""
         if self._message_callback:
             self._message_callback(message)
+
+    def cleanup_working_directory(self, exclude_patterns: List[str] = None) -> Tuple[int, List[str]]:
+        """
+        Очищает рабочую директорию от файлов, не трогая папки и защищённые типы файлов.
+        
+        Args:
+            exclude_patterns: Список паттернов файлов для исключения (не удалять)
+            
+        Returns:
+            (количество удалённых файлов, список ошибок)
+        """
+        if exclude_patterns is None:
+            exclude_patterns = ['*.exe', '*.py', '*.pyw']
+        
+        deleted_count = 0
+        errors = []
+        
+        self._send_message(AppMessage.info(
+            "🧹 Очистка рабочей директории...",
+            source="FileManager"
+        ))
+        
+        try:
+            for item in self._ctx.working_dir.iterdir():
+                # Пропускаем папки
+                if item.is_dir():
+                    continue
+                
+                # Проверяем, попадает ли файл под исключение
+                should_exclude = False
+                for pattern in exclude_patterns:
+                    if item.match(pattern):
+                        should_exclude = True
+                        break
+                
+                if should_exclude:
+                    self._send_message(AppMessage.debug(
+                        f"  Сохранён: {item.name} (исключён по паттерну)",
+                        source="FileManager"
+                    ))
+                    continue
+                
+                # Удаляем файл
+                try:
+                    item.unlink()
+                    deleted_count += 1
+                    self._send_message(AppMessage.debug(
+                        f"  Удалён: {item.name}",
+                        source="FileManager"
+                    ))
+                except Exception as e:
+                    error_msg = f"Не удалось удалить {item.name}: {e}"
+                    errors.append(error_msg)
+                    self._send_message(AppMessage.warning(
+                        error_msg,
+                        source="FileManager"
+                    ))
+            
+            if deleted_count > 0:
+                self._send_message(AppMessage.info(
+                    f"✅ Очистка завершена. Удалено файлов: {deleted_count}",
+                    source="FileManager"
+                ))
+            else:
+                self._send_message(AppMessage.info(
+                    "✨ В рабочей директории нет файлов для удаления",
+                    source="FileManager"
+                ))
+                
+        except Exception as e:
+            error_msg = f"Ошибка при очистке рабочей директории: {e}"
+            errors.append(error_msg)
+            self._send_message(AppMessage.error(
+                error_msg,
+                source="FileManager"
+            ))
+        
+        return deleted_count, errors
