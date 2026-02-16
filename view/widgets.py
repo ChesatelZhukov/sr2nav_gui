@@ -197,8 +197,10 @@ class FileEntryWidget(tk.Frame):
     def _on_stitch(self):
         """Обработчик кнопки сшивки."""
         if self._stitch_callback:
-            # ИСПРАВЛЕНО: передаем ключ файла в колбэк
             self._stitch_callback(self._file_key)
+        else:
+            # Логируем ошибку, но не падаем
+            print(f"Warning: Stitch callback called for {self._label_text} but not provided.")
     
     def _show_error(self, title: str, message: str):
         """Показывает сообщение об ошибке."""

@@ -622,10 +622,12 @@ class GPSAnalysisWindow:
             )
     
     def show_error(self, error: str):
-        self.hide_loading()
+        """Показывает ошибку и гарантированно скрывает загрузку."""
+        self.hide_loading()  # <-- ОБЯЗАТЕЛЬНО скрываем загрузку
         self.status_label.config(text=f"Ошибка: {error}", fg=Theme.ERROR)
         self.quality_label.config(text="")
         
+        # Очищаем содержимое вкладок
         for frame in [self.plot_frame, self.stats_frame, self.report_frame]:
             for widget in frame.winfo_children():
                 widget.destroy()

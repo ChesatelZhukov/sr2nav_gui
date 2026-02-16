@@ -256,13 +256,21 @@ class ProcessRunner:
             
         except asyncio.TimeoutError:
             if process_type == ProcessType.INTERVAL:
-                # Interval.exe не завершается самостоятельно — это норма
                 self._send_message(
                     AppMessage.debug(
                         "ℹ️ Interval.exe: превышен таймаут (штатное поведение)",
                         source="ProcessRunner"
                     )
                 )
+                # Явно завершаем процесс, так как мы его больше не ждем
+                if self._process:
+                    try:
+                        self._process.terminate()
+                        await asyncio.sleep(0.1) # Даем время на завершение
+                        if self._process.returncode is None:
+                            self._process.kill()
+                    except ProcessLookupError:
+                        pass # Процесс уже завершился
                 return_code = 0
             else:
                 self._send_message(

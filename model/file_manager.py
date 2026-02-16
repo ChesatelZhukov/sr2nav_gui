@@ -376,37 +376,40 @@ class FileManager:
         backup_path = path.with_suffix('.bak')
         
         try:
-            # Создаём резервную копию
+            # 1. Создаём резервную копию
             shutil.copy2(path, backup_path)
             
-            # Создаём новый файл с заголовком
+            # 2. Создаём новый файл с заголовком
             with open(path, 'rb') as src, open(temp_path, 'wb') as dst:
                 dst.write(self.JPS_HEADER_BYTES)
                 shutil.copyfileobj(src, dst)
             
-            # Получаем размеры файлов
+            # 3. Проверяем размер
             original_size = backup_path.stat().st_size
             new_size = temp_path.stat().st_size
             
-            # ИСПРАВЛЕНО: Проверяем, что новый файл ровно на длину заголовка больше
             if new_size == original_size + len(self.JPS_HEADER_BYTES):
-                shutil.move(temp_path, path)
+                # 4. Атомарно заменяем оригинал
+                os.replace(temp_path, path)
                 backup_path.unlink(missing_ok=True)
                 return True
             else:
                 # Восстанавливаем из бэкапа
-                shutil.move(backup_path, path)
+                os.replace(backup_path, path)
                 if temp_path.exists():
                     temp_path.unlink()
                 return False
                 
         except Exception as e:
             self._send_message(AppMessage.error(f"Ошибка добавления заголовка: {e}"))
-            
             # Пытаемся восстановить
             if backup_path.exists():
-                shutil.move(backup_path, path)
+                os.replace(backup_path, path)
             return False
+        finally:
+            # Очищаем временные файлы, если они остались
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
     
     # ==================== СОЗДАНИЕ КОНФИГОВ ====================
     
