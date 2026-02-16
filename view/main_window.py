@@ -44,7 +44,7 @@ class MainWindow:
             controller: Контроллер приложения для обработки событий
         """
         self._controller = controller
-        
+        self._current_stitch_target = "rover"
         # UI элементы
         self._root: Optional[tk.Tk] = None
         self._file_widgets: Dict[str, FileEntryWidget] = {}
@@ -84,7 +84,15 @@ class MainWindow:
         """Корректное завершение приложения (вызывается из контроллера)."""
         if self._root:
             self._root.quit()
-    
+
+    def update_window_title(self, rover_name: str) -> None:
+        """Обновляет заголовок окна с именем ровера."""
+        if self._root:
+            if rover_name and rover_name.strip():
+                self._root.title(f"SR2NAV Studio — {rover_name} — Обработка GNSS данных")
+            else:
+                self._root.title("SR2NAV Studio — Обработка GNSS данных")
+
     # ==================== МЕТОДЫ ДЛЯ КОНТРОЛЛЕРА ====================
     
     def get_all_file_paths(self) -> Dict[str, str]:
@@ -710,7 +718,7 @@ class MainWindow:
         dialog = TransformFileDialog(
             self._root,
             str(APP_CONTEXT.results_dir),
-            self._controller.on_transform_files,
+            self._controller.on_transform_files,  # <- Добавить подчеркивание
         )
         dialog.show()
     
