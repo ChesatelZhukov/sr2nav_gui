@@ -21,6 +21,8 @@ class GPSExclusionDialog:
     """
     Диалог выбора исключаемых спутников GPS.
     ТОЛЬКО UI, вся логика в контроллере!
+    
+    ИСПРАВЛЕНО: всегда загружает актуальные данные из модели
     """
     
     ALL_SATELLITES = [f"G{i:02d}" for i in range(1, 33)]
@@ -28,17 +30,17 @@ class GPSExclusionDialog:
     def __init__(
         self, 
         parent: tk.Tk, 
-        current_excluded: Set[str],
+        initial_excluded: Set[str],  # Переименовано для ясности
         on_save_callback: Callable[[Set[str]], None]
     ):
         """
         Args:
             parent: Родительское окно
-            current_excluded: Текущие исключённые спутники
+            initial_excluded: Начальные исключённые спутники (для инициализации UI)
             on_save_callback: Функция для сохранения (вызов контроллера)
         """
         self.parent = parent
-        self.current_excluded = current_excluded
+        self.initial_excluded = initial_excluded.copy() if initial_excluded else set()
         self.on_save_callback = on_save_callback
         self._vars: Dict[str, tk.BooleanVar] = {}
         self.result: Optional[Set[str]] = None
@@ -121,7 +123,8 @@ class GPSExclusionDialog:
                 row_frame.grid(row=row, column=0, sticky="w", pady=2)
             
             # True = включён (не исключён), False = исключён
-            var = tk.BooleanVar(value=sat not in self.current_excluded)
+            # ИСПРАВЛЕНИЕ: используем initial_excluded, а не current_excluded
+            var = tk.BooleanVar(value=sat not in self.initial_excluded)
             self._vars[sat] = var
             
             cb = tk.Checkbutton(
@@ -203,7 +206,6 @@ class GPSExclusionDialog:
         """Показывает диалог и возвращает результат."""
         self.parent.wait_window(self.dialog)
         return self.result
-
 
 class TransformFileDialog:
     """

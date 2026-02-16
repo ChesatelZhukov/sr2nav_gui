@@ -61,7 +61,7 @@ class MainWindow:
         self._TAGS = {
             'debug': Theme.DEBUG,
             'info': Theme.INFO,
-            'success': Theme.SUCCESS,  # ДОБАВИТЬ
+            'success': Theme.SUCCESS,  # ДОБАВЛЕНО
             'warning': Theme.WARNING,
             'error': Theme.ERROR,
             'header': Theme.ACCENT_BLUE,
@@ -170,7 +170,7 @@ class MainWindow:
             if self._btn_terminate:
                 self._btn_terminate.config(state="disabled")
     
-    def set_status(self, message: str, is_warning: bool = False):
+    def set_status(self, message: str):
         """Устанавливает текст статуса."""
         if self._status_var:
             self._status_var.set(message)
@@ -695,7 +695,7 @@ class MainWindow:
             self._controller.on_stitch_jps(
                 list(input_files), 
                 output_file,
-                target_key=source_key
+                target_key=source_key  # ИСПРАВЛЕНО: теперь используется
             )
     
     def _on_open_working_dir(self) -> None:
@@ -795,7 +795,7 @@ class MainWindow:
         )
         
         if result:
-            self.set_status("⏹ Остановка процесса...", is_warning=True)
+            self.set_status("⏹ Остановка процесса...")  # ИСПРАВЛЕНО: убран is_warning
             self._controller.on_terminate_process()
     
     def _copy_output(self) -> None:

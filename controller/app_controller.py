@@ -346,7 +346,6 @@ class ApplicationController:
             
             # 3. Подготовка (Model)
             self._file_manager.cleanup_results_dir()
-            self._gps_excluder.save_excluded(self._gps_excluder.load_excluded())
             
             # 4. Обновление View (состояние обработки)
             sr2nav_path = self._file_manager.get_original_path(FileType.SR2NAV_EXE)
@@ -493,10 +492,12 @@ class ApplicationController:
         if not self._window:
             return
         
+        # ИСПРАВЛЕНИЕ: загружаем актуальные данные КАЖДЫЙ раз при открытии
         current_excluded = self._gps_excluder.load_excluded()
+        
         dialog = GPSExclusionDialog(
             self._window.window,
-            current_excluded,
+            current_excluded,  # Передаем свежие данные
             self._on_gps_exclusion_saved
         )
         dialog.show()

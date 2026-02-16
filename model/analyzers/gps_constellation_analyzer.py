@@ -488,7 +488,7 @@ class GPSConstellationAnalyzer:
             
             df = pd.read_csv(
                 filepath,
-                sep='\s+',
+                sep=r'\s+',  # <-- ИСПРАВЛЕНО: сырая строка
                 header=0,
                 engine='python',
                 on_bad_lines='skip'
@@ -518,7 +518,6 @@ class GPSConstellationAnalyzer:
             return None
     
     def detect_gaps(self, visibility: np.ndarray, time_seconds: np.ndarray) -> List[SatelliteInterval]:
-        """Детектирует ВСЕ интервалы видимости спутника (сырые)."""
         if not np.any(visibility):
             return []
         
@@ -526,23 +525,25 @@ class GPSConstellationAnalyzer:
         starts = np.where(diff == 1)[0] + 1
         ends = np.where(diff == -1)[0] + 1
         
+        # Корректировка границ
         if visibility[0]:
             starts = np.insert(starts, 0, 0)
         if visibility[-1]:
             ends = np.append(ends, len(visibility))
         
+        # Проверка на соответствие длин
+        min_len = min(len(starts), len(ends))
         intervals = []
-        for start_idx, end_idx in zip(starts, ends):
-            end_time_idx = min(end_idx - 1, len(time_seconds) - 1)
-            start_time = time_seconds[start_idx]
-            end_time = time_seconds[end_time_idx]
-            duration = end_time - start_time
+        
+        for i in range(min_len):
+            start_idx = starts[i]
+            end_idx = min(ends[i] - 1, len(time_seconds) - 1)
             
-            intervals.append(SatelliteInterval(
-                start=start_time,
-                end=end_time,
-                duration=duration
-            ))
+            if start_idx < len(time_seconds) and end_idx < len(time_seconds):
+                intervals.append(SatelliteInterval(
+                    start=float(time_seconds[start_idx]),
+                    end=float(time_seconds[end_idx])
+                ))
         
         return intervals
     

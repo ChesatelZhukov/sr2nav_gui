@@ -12,10 +12,10 @@ import numpy as np
 from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 from pathlib import Path
+import pyperclip  # ИСПРАВЛЕНО: добавлен импорт
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
-from matplotlib.widgets import RectangleSelector
 
 
 class VelocityAnalysisWindow:
@@ -61,10 +61,21 @@ class VelocityAnalysisWindow:
         self.show_folder_selection_prompt()
     
     def on_close(self):
-        """Закрытие окна."""
+        """Закрытие окна с очисткой ресурсов."""
         try:
+            # Очищаем интерактивный зум
+            if hasattr(self, 'interactive_zoom') and self.interactive_zoom:
+                self.interactive_zoom.cleanup()
+                self.interactive_zoom = None
+            
+            # Закрываем фигуру matplotlib
+            if hasattr(self, 'current_fig') and self.current_fig:
+                import matplotlib.pyplot as plt
+                plt.close(self.current_fig)
+                self.current_fig = None
+            
             self.window.grab_release()
-        except:
+        except Exception:
             pass
         self.window.destroy()
 

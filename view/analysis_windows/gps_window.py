@@ -12,7 +12,7 @@ import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
-import pyperclip
+import pyperclip  # ИСПРАВЛЕНО: добавлен импорт
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
@@ -73,9 +73,21 @@ class GPSAnalysisWindow:
         self.show_folder_selection_prompt()
     
     def on_close(self):
+        """Закрытие окна с очисткой ресурсов."""
         try:
+            # Очищаем интерактивный зум
+            if hasattr(self, 'interactive_zoom') and self.interactive_zoom:
+                self.interactive_zoom.cleanup()
+                self.interactive_zoom = None
+            
+            # Закрываем фигуру matplotlib
+            if hasattr(self, 'current_fig') and self.current_fig:
+                import matplotlib.pyplot as plt
+                plt.close(self.current_fig)
+                self.current_fig = None
+            
             self.window.grab_release()
-        except:
+        except Exception:
             pass
         self.window.destroy()
 
@@ -670,12 +682,12 @@ class GPSAnalysisWindow:
             info_text = (
                 f"Видимых: {result.get('visible_satellites', 0)} | "
                 f"Длительность: {duration_text}\n"
-                f"🟢 Отл/Эт: {excellent_count} | "
-                f"🔵 Хор: {good_count} | "
-                f"🟠 Умер: {moderate_count}\n"
-                f"🔴 Нест: {unstable_count} | "
-                f"🟤 Плох: {bad_count} | "
-                f"⚫ Крит: {critical_count}"
+                f"[GREEN] Отл/Эт: {excellent_count} | "
+                f"[BLUE] Хор: {good_count} | "
+                f"[ORANGE] Умер: {moderate_count}\n"
+                f"[RED] Нест: {unstable_count} | "
+                f"[BROWN] Плох: {bad_count} | "
+                f"[BLACK] Крит: {critical_count}"
             )
             
             ax.text(

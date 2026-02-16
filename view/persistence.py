@@ -3,7 +3,7 @@
 """
 ЧИСТОЕ ПРЕДСТАВЛЕНИЕ - Утилиты для сохранения состояния UI.
 """
-import os
+import os, sys
 from typing import Optional
 
 
@@ -21,8 +21,14 @@ class UIPersistence:
     @classmethod
     def set_last_dir(cls, path: str) -> None:
         """Сохраняет последнюю использованную папку."""
-        if path and os.path.exists(os.path.dirname(path)):
-            cls._last_browse_dir = os.path.dirname(path)
+        if path:
+            # Для Windows путей длиннее 260 символов
+            if sys.platform == 'win32' and len(path) > 240:
+                path = '\\\\?\\' + path
+            
+            dir_path = os.path.dirname(path) if os.path.isfile(path) else path
+            if dir_path and os.path.exists(dir_path):
+                cls._last_browse_dir = dir_path
     
     @classmethod
     def update_from_path(cls, path: str) -> None:

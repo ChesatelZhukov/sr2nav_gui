@@ -10,7 +10,6 @@ import threading
 import time
 from typing import Optional, Dict, Any, Callable, Awaitable
 import concurrent.futures
-from weakref import WeakValueDictionary
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -58,19 +57,18 @@ class AsyncManager:
     # ==================== УПРАВЛЕНИЕ ЖИЗНЕННЫМ ЦИКЛОМ ====================
     
     def start(self) -> None:
-        """Запускает фоновый поток с event loop."""
         if self._running:
             return
         
         self._stop_event.clear()
+        loop_ready = threading.Event()  # <-- Добавить
         
         def _run_loop() -> None:
-            """Внутренняя функция — исполняется в отдельном потоке."""
             try:
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
                 self._running = True
-                
+                loop_ready.set()  # <-- Сигнал о готовности
                 self._loop.run_forever()
                 
             except Exception as error:
@@ -83,6 +81,7 @@ class AsyncManager:
         
         self._thread = threading.Thread(target=_run_loop, daemon=True)
         self._thread.start()
+        loop_ready.wait(timeout=1.0)  # <-- Ожидание готовности
         
         # Ожидаем готовности цикла
         while self._loop is None and not self._stop_event.is_set():

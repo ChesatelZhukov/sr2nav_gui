@@ -165,12 +165,24 @@ class FileTransformer:
                 
                 # 2. Читаем исходный файл, пропуская N строк
                 with open(src, 'r', encoding='utf-8', errors='ignore') as f_src:
-                    # Пропускаем строки
-                    for _ in range(config['remove_lines']):
-                        f_src.readline()
-                    
-                    # Копируем остальное
-                    shutil.copyfileobj(f_src, tmp)
+                    # Проверка на пустой файл
+                    first_line = f_src.readline()
+                    if not first_line:
+                        self._send_message(AppMessage.warning(
+                            f"Файл {src.name} пустой", 
+                            source="FileTransformer"
+                        ))
+                        tmp.write('\n')  # Минимальное содержимое
+                    else:
+                        # Возвращаемся к началу
+                        f_src.seek(0)
+                        
+                        # Пропускаем строки
+                        for _ in range(config['remove_lines']):
+                            f_src.readline()
+                        
+                        # Копируем остальное
+                        shutil.copyfileobj(f_src, tmp)
             
             # Перемещаем временный файл в целевой
             dst.parent.mkdir(parents=True, exist_ok=True)

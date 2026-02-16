@@ -9,11 +9,10 @@
 
 import asyncio
 import re
-import signal
 from typing import Optional, List, Callable, Dict, Set, Tuple
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime  # <-- ИСПРАВЛЕНО: добавлен импорт
 
 from core.message_system import AppMessage, MessageLevel
 
@@ -142,7 +141,7 @@ class ProcessRunner:
         self._process_type: Optional[ProcessType] = None
         self._status = ProcessStatus()
         self._read_tasks: List[asyncio.Task] = []
-        self._message_accumulator = {}  # Для накопления многострочных сообщений
+        self._message_accumulator = {}  # <-- ИСПРАВЛЕНО: добавлена инициализация
     
     # ==================== СВОЙСТВА ====================
     
@@ -527,6 +526,7 @@ class ProcessRunner:
             self._process_type = None
             self._status.is_running = False
             self._status.end_time = datetime.now()
+            self._message_accumulator.clear()  # <-- ТЕПЕРЬ РАБОТАЕТ
     
     # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
     

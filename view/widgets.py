@@ -1,3 +1,5 @@
+# view/widgets.py - ИСПРАВЛЕННЫЙ InteractiveZoom
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -6,9 +8,10 @@
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import Callable, Optional, Dict, List, Any, Tuple
+from typing import Callable, Optional, Dict, List, Any, Tuple, Set
 import os
 import numpy as np
+import weakref
 
 from view.themes import Theme
 
@@ -78,7 +81,7 @@ class FileEntryWidget(tk.Frame):
         open_callback: Callable,
         stitch_callback: Optional[Callable] = None,
         expected_extension: Optional[str] = None,
-        file_key: Optional[str] = None,  # ИСПРАВЛЕНО: добавляем ключ файла
+        file_key: Optional[str] = None,
         **kwargs
     ):
         super().__init__(master, bg=Theme.BG_PRIMARY, **kwargs)
@@ -88,7 +91,7 @@ class FileEntryWidget(tk.Frame):
         self._stitch_callback = stitch_callback
         self._expected_extension = expected_extension
         self._label_text = label_text
-        self._file_key = file_key  # ИСПРАВЛЕНО: сохраняем ключ
+        self._file_key = file_key
         
         # Контейнер
         container = tk.Frame(self, bg=Theme.BG_PRIMARY)
@@ -199,7 +202,6 @@ class FileEntryWidget(tk.Frame):
         if self._stitch_callback:
             self._stitch_callback(self._file_key)
         else:
-            # Логируем ошибку, но не падаем
             print(f"Warning: Stitch callback called for {self._label_text} but not provided.")
     
     def _show_error(self, title: str, message: str):
@@ -277,11 +279,13 @@ class CollapsibleFrame(tk.Frame):
 class InteractiveZoom:
     """
     Интерактивный зум для matplotlib графиков.
-    ИСПРАВЛЕНО: корректная работа со списками и массивами numpy
+    ИСПРАВЛЕНО v2.0: правильная очистка ресурсов, явный метод cleanup
     """
     
     def __init__(self, fig, axes):
         self.fig = fig
+        self._is_cleaned_up = False
+        self._connections = []  # Храним ID соединений для отключения
         
         # УНИВЕРСАЛЬНОЕ ПРЕОБРАЗОВАНИЕ: работает и со списком, и с numpy array
         if axes is None:
@@ -329,12 +333,14 @@ class InteractiveZoom:
             )
             self._selectors.append(selector)
         
-        # Подключаем глобальные обработчики
-        self.fig.canvas.mpl_connect('button_press_event', self._on_mouse_press)
-        self.fig.canvas.mpl_connect('button_release_event', self._on_mouse_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self._on_mouse_motion)
-        self.fig.canvas.mpl_connect('scroll_event', self._on_scroll)
-        self.fig.canvas.mpl_connect('button_press_event', self._on_double_click)
+        # Подключаем глобальные обработчики и сохраняем ID для отключения
+        cid1 = self.fig.canvas.mpl_connect('button_press_event', self._on_mouse_press)
+        cid2 = self.fig.canvas.mpl_connect('button_release_event', self._on_mouse_release)
+        cid3 = self.fig.canvas.mpl_connect('motion_notify_event', self._on_mouse_motion)
+        cid4 = self.fig.canvas.mpl_connect('scroll_event', self._on_scroll)
+        cid5 = self.fig.canvas.mpl_connect('button_press_event', self._on_double_click)
+        
+        self._connections = [cid1, cid2, cid3, cid4, cid5]
     
     def _make_on_select(self, ax):
         """Создает функцию обработки выделения для конкретной оси."""
@@ -430,11 +436,45 @@ class InteractiveZoom:
                 ax.set_ylim(self._original_ylim[ax])
         self.fig.canvas.draw_idle()
     
+    def cleanup(self):
+        """
+        ЯВНАЯ ОЧИСТКА РЕСУРСОВ.
+        Вызывать при закрытии окна!
+        """
+        if self._is_cleaned_up:
+            return
+        
+        try:
+            # Отключаем все соединения
+            if hasattr(self, 'fig') and self.fig and hasattr(self.fig, 'canvas'):
+                for cid in self._connections:
+                    try:
+                        self.fig.canvas.mpl_disconnect(cid)
+                    except Exception:
+                        pass
+            
+            # Деактивируем селекторы
+            for selector in self._selectors:
+                try:
+                    selector.set_active(False)
+                    selector.set_visible(False)
+                except Exception:
+                    pass
+            
+            # Очищаем ссылки
+            self._selectors.clear()
+            self._connections.clear()
+            self._original_xlim.clear()
+            self._original_ylim.clear()
+            
+            self._is_cleaned_up = True
+            
+        except Exception as e:
+            print(f"Ошибка при очистке InteractiveZoom: {e}")
+    
     def __del__(self):
-        """Очистка селекторов при удалении."""
-        for selector in self._selectors:
-            try:
-                selector.set_active(False)
-                selector.set_visible(False)
-            except:
-                pass
+        """Резервная очистка при удалении (на всякий случай)."""
+        self.cleanup()
+
+
+# Остальные классы (если есть) остаются без изменений

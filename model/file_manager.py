@@ -148,7 +148,7 @@ class FileManager:
         """
         Устанавливает путь к роверу и обновляет папку результатов.
         """
-        if not path:
+        if not path or str(path).strip() == '':
             self._original_paths.pop(FileType.ROVER, None)
             self._working_paths.pop(FileType.ROVER, None)
             return
@@ -159,13 +159,12 @@ class FileManager:
         if path_obj.parent == self._ctx.working_dir:
             self._working_paths[FileType.ROVER] = path_obj
         
-        # ДОБАВЛЯЕМ ПРОВЕРКУ - path точно не None здесь
-        if str(path).strip():  # <-- дополнительная проверка
-            new_dir = self._ctx.set_results_dir_from_rover(str(path))
-            self._send_message(AppMessage.info(
-                f"📁 Папка результатов: {new_dir.name}",
-                source="FileManager"
-            ))
+        # Создаем папку результатов на основе имени файла ровера
+        new_dir = self._ctx.set_results_dir_from_rover(str(path))
+        self._send_message(AppMessage.info(
+            f"📁 Папка результатов: {new_dir.name}",
+            source="FileManager"
+        ))
     
     def get_path(self, file_type: FileType) -> Optional[Path]:
         """Возвращает путь к файлу в рабочей директории (если есть)."""
