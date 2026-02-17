@@ -1,6 +1,27 @@
 """
-ЧИСТАЯ МОДЕЛЬ - Пакет анализаторов данных.
-Только алгоритмы, никакого UI!
+Пакет анализаторов данных для обработки навигационных измерений.
+
+Содержит чистые модели (бизнес-логику) для различных видов анализа:
+- Анализ скоростей (VelocityAnalyzer)
+- Анализ GPS созвездия (GPSConstellationAnalyzer)
+
+Все анализаторы следуют единому интерфейсу BaseAnalyzer и возвращают
+результаты в формате AnalysisResult или его специализированных наследников.
+
+Архитектура:
+    BaseAnalyzer (абстрактный базовый класс)
+    ├── VelocityAnalyzer
+    │   ├── VelocityData - сырые данные скоростей
+    │   ├── VelocityStatistics - статистические показатели
+    │   └── VelocityAnalysisResult - объединённый результат
+    └── GPSConstellationAnalyzer
+        ├── SatelliteInterval - интервалы видимости спутников
+        ├── SatelliteStatistics - статистика по спутнику
+        ├── GPSConstellationData - данные о созвездии
+        └── GPSConstellationAnalysisResult - полный результат анализа
+
+Все классы в этом пакете не имеют зависимостей от UI и могут использоваться
+в любом контексте (консольные утилиты, веб-сервисы, GUI приложения).
 """
 from model.analyzers.base_analyzer import BaseAnalyzer, AnalysisResult
 from model.analyzers.velocity_analyzer import (
@@ -18,17 +39,17 @@ from model.analyzers.gps_constellation_analyzer import (
 )
 
 __all__ = [
-    # Base
+    # Базовые классы
     'BaseAnalyzer',
     'AnalysisResult',
     
-    # Velocity
+    # Компоненты анализа скоростей
     'VelocityAnalyzer',
     'VelocityData',
     'VelocityStatistics',
     'VelocityAnalysisResult',
     
-    # GPS
+    # Компоненты анализа GPS созвездия
     'GPSConstellationAnalyzer',
     'SatelliteInterval',
     'SatelliteStatistics',

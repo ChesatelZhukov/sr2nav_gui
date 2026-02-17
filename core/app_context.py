@@ -1,12 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Контекст приложения — единый источник истины о путях и ресурсах.
-Работает одинаково в режиме скрипта и скомпилированного EXE.
+Глобальный контекст приложения — единый источник истины о путях и ресурсах.
+
+Обеспечивает централизованный доступ ко всем файлам и директориям,
+используемым в приложении. Пути вычисляются однократно при инициализации
+и остаются неизменными, что гарантирует консистентность состояния.
+
+Особенности:
+    - Работает одинаково в режиме скрипта и скомпилированного EXE
+    - Все пути вычисляются лениво (через свойства) или при инициализации
+    - Контекст неизменяем (frozen dataclass) после создания
+    - Предоставляет глобальный синглтон APP_CONTEXT для всего приложения
+
+Пример:
+    >>> from core.app_context import APP_CONTEXT
+    >>> APP_CONTEXT.results_dir
+    WindowsPath('C:/SR2NAV/rover_name')
+    >>> APP_CONTEXT.interval_exe.exists()
+    True
 """
 
 import sys
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
@@ -15,81 +32,106 @@ from typing import Optional, Union
 @dataclass(frozen=True)
 class AppContext:
     """
-    Неизменяемый контекст приложения.
+    Неизменяемый контекст приложения, содержащий все пути к ресурсам.
     
-    Все пути вычисляются один раз при инициализации и не меняются
-    в течение всей работы программы. Это гарантирует консистентность.
+    После создания экземпляра все пути фиксируются. Единственное исключение —
+    директория результатов (_results_dir_value), которая может быть обновлена
+    при выборе файла ровера через set_results_dir_from_rover().
     
-    Пример:
-        >>> ctx = AppContext()
-        >>> ctx.results_dir
-        WindowsPath('C:/SR2NAV/results')
+    Атрибуты:
+        base_dir: Корневая директория приложения (автоопределяется)
+        working_dir: Рабочая директория (совпадает с base_dir)
+        tbl_dir: Директория для TBL файлов (working_dir/tbl)
+        
+    Свойства:
+        results_dir: Директория для результатов обработки (может меняться)
+        interval_exe: Путь к Interval.exe
+        sr2nav_cfg: Путь к конфигурационному файлу SR2Nav.cfg
+        mask_ang: Путь к файлу маски углов Mask.Ang
+        exclude_svs: Путь к файлу исключённых спутников Exclude.svs
+        interval_txt: Путь к файлу интервала interval.txt
     """
     
     # ============ БАЗОВЫЕ ПУТИ ============
     
     base_dir: Path = field(default_factory=lambda: AppContext._locate_base_dir())
-    working_dir: Path = field(init=False)  # Устанавливается в __post_init__
+    working_dir: Path = field(init=False)
+    _results_dir_value: Optional[Path] = field(default=None, init=False)
     
     def __post_init__(self) -> None:
         """
         Инициализирует зависимые пути и создаёт необходимые директории.
         
-        Важно: используется object.__setattr__ для обхода frozen=True
+        Вызывается автоматически после создания экземпляра.
+        Устанавливает working_dir = base_dir и создаёт директорию tbl.
         """
         object.__setattr__(self, 'working_dir', self.base_dir)
-        object.__setattr__(self, 'results_dir', self.working_dir / "results")
         object.__setattr__(self, 'tbl_dir', self.working_dir / "tbl")
-        
         self._ensure_directories()
     
     @staticmethod
     def _locate_base_dir() -> Path:
         """
-        Определяет корневую директорию приложения.
+        Определяет корневую директорию приложения в зависимости от режима запуска.
         
-        Приоритет:
-            1. Директория скомпилированного EXE (PyInstaller)
-            2. Родительская директория текущего файла (разработка)
+        Returns:
+            Path: Абсолютный путь к корневой директории
+            
+        Логика определения:
+            - В скомпилированном EXE: директория, где находится исполняемый файл
+            - В режиме скрипта: родительская директория от core/app_context.py
         """
         if getattr(sys, 'frozen', False):
-            # Скомпилированное приложение
             return Path(sys.executable).parent.absolute()
-        
-        # Режим разработки — поднимаемся из core/ в корень проекта
         return Path(__file__).parent.parent.absolute()
     
     def _ensure_directories(self) -> None:
         """
-        Создаёт необходимые директории с проверкой прав доступа.
-        В случае frozen-режима ошибки игнорируются (read-only).
+        Создаёт необходимые директории, если они не существуют.
+        
+        Игнорирует ошибки прав доступа в скомпилированной версии,
+        но позволяет им всплывать в режиме разработки для отладки.
+        
+        Создаваемые директории:
+            - tbl_dir: для временных TBL файлов
         """
-        for dir_path in [self.results_dir, self.tbl_dir]:
-            try:
-                dir_path.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                if getattr(sys, 'frozen', False):
-                    # В скомпилированном приложении может быть read-only
-                    continue
-                raise
-            except OSError:
-                if getattr(sys, 'frozen', False):
-                    continue
+        try:
+            self.tbl_dir.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError):
+            if getattr(sys, 'frozen', False):
+                # В скомпилированной версии не прерываем работу
+                # из-за невозможности создать директорию
+                pass
+            else:
+                # В режиме разработки ошибка должна быть видна
                 raise
     
     # ============ ДИРЕКТОРИИ ============
     
-    results_dir: Path = field(init=False)
-    """Директория для выходных файлов обработки."""
+    @property
+    def results_dir(self) -> Path:
+        """
+        Директория для выходных файлов обработки.
+        
+        Возвращает:
+            - Если установлена через set_results_dir_from_rover(): путь к именной папке
+            - Иначе: working_dir/results (папка по умолчанию)
+        
+        Note:
+            Это свойство, а не атрибут, так как значение может измениться
+            при выборе нового файла ровера.
+        """
+        if self._results_dir_value is None:
+            return self.working_dir / "results"
+        return self._results_dir_value
     
     tbl_dir: Path = field(init=False)
-    """Директория для трансформированных TBL-файлов."""
     
     # ============ ФАЙЛЫ ============
     
     @property
     def interval_exe(self) -> Path:
-        """Путь к исполняемому файлу Interval.exe."""
+        """Путь к исполняемому файлу Interval.exe в рабочей директории."""
         return self.working_dir / "Interval.exe"
     
     @property
@@ -109,8 +151,48 @@ class AppContext:
     
     @property
     def interval_txt(self) -> Path:
-        """Путь к файлу результатов Interval.exe."""
+        """Путь к файлу с определённым временным интервалом interval.txt."""
         return self.working_dir / "interval.txt"
+    
+    # ============ УПРАВЛЕНИЕ ДИРЕКТОРИЕЙ РЕЗУЛЬТАТОВ ============
+    
+    def set_results_dir_from_rover(self, rover_path: Union[str, Path]) -> Path:
+        """
+        Создаёт именованную папку результатов на основе имени файла ровера.
+        
+        Это единственный метод, который может изменить состояние контекста
+        после его создания. Папка создаётся в рабочей директории с именем,
+        соответствующим имени файла ровера (очищенным от недопустимых символов).
+        
+        Args:
+            rover_path: Путь к файлу ровера (.jps). Может быть пустым.
+            
+        Returns:
+            Path: Путь к созданной (или существующей) директории результатов.
+            
+        Example:
+            >>> APP_CONTEXT.set_results_dir_from_rover("data/rover_2023.jps")
+            WindowsPath('C:/SR2NAV/rover_2023')
+            
+        Note:
+            Если rover_path пуст или не указан, создаётся папка "results"
+            в рабочей директории.
+        """
+        if not rover_path:
+            fallback = self.working_dir / "results"
+            fallback.mkdir(parents=True, exist_ok=True)
+            object.__setattr__(self, '_results_dir_value', fallback)
+            return fallback
+        
+        rover_name = Path(rover_path).stem
+        # Очищаем имя от символов, недопустимых в именах папок Windows
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', rover_name)
+        new_results_dir = self.working_dir / safe_name
+        new_results_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Обновляем значение через object.__setattr__ из-за frozen=True
+        object.__setattr__(self, '_results_dir_value', new_results_dir)
+        return new_results_dir
     
     # ============ ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ============
     
@@ -120,13 +202,13 @@ class AppContext:
         
         Args:
             path: Относительный или абсолютный путь
-        
+            
         Returns:
-            Абсолютный объект Path
-        
-        Пример:
-            >>> APP_CONTEXT.resolve("Interval.exe")
-            WindowsPath('C:/SR2NAV/Interval.exe')
+            Path: Абсолютный нормализованный путь
+            
+        Example:
+            >>> APP_CONTEXT.resolve("temp/file.txt")
+            WindowsPath('C:/SR2NAV/temp/file.txt')
         """
         path_obj = Path(path)
         if path_obj.is_absolute():
@@ -138,34 +220,56 @@ class AppContext:
         Проверяет существование файла в рабочей директории.
         
         Args:
-            filename: Имя файла (относительный путь)
-        
+            filename: Имя файла (или относительный путь)
+            
         Returns:
-            True если файл существует
+            bool: True если файл существует
+            
+        Example:
+            >>> APP_CONTEXT.exists_in_working_dir("Interval.exe")
+            True
         """
         return (self.working_dir / filename).exists()
     
     def __repr__(self) -> str:
-        """Человекочитаемое представление контекста."""
+        """
+        Строковое представление контекста для отладки.
+        
+        Показывает текущее состояние: рабочую директорию,
+        директорию результатов и директорию TBL.
+        """
+        results_display = self._results_dir_value.name if self._results_dir_value else "results (default)"
         return (
             f"AppContext(\n"
             f"  working_dir={self.working_dir},\n"
-            f"  results_dir={self.results_dir},\n"
+            f"  results_dir={results_display},\n"
             f"  tbl_dir={self.tbl_dir}\n"
             f")"
         )
 
 
-# ==================== ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР ====================
+# ==================== ГЛОБАЛЬНЫЙ СИНГЛТОН ====================
 
 _APP_CONTEXT_INSTANCE: Optional[AppContext] = None
 
 
 def get_app_context() -> AppContext:
     """
-    Возвращает глобальный экземпляр контекста приложения.
+    Возвращает глобальный экземпляр контекста приложения (синглтон).
     
-    Создаёт его при первом вызове, при последующих возвращает кэшированный.
+    При первом вызове создаёт экземпляр AppContext, при последующих —
+    возвращает уже существующий. Это гарантирует, что все компоненты
+    приложения используют один и тот же контекст с согласованными путями.
+    
+    Returns:
+        AppContext: Глобальный контекст приложения
+        
+    Example:
+        >>> from core.app_context import get_app_context
+        >>> ctx = get_app_context()
+        >>> ctx2 = get_app_context()
+        >>> ctx is ctx2  # Всегда True
+        True
     """
     global _APP_CONTEXT_INSTANCE
     if _APP_CONTEXT_INSTANCE is None:
@@ -173,5 +277,5 @@ def get_app_context() -> AppContext:
     return _APP_CONTEXT_INSTANCE
 
 
-# Для обратной совместимости
+# Удобный глобальный доступ для всего приложения
 APP_CONTEXT = get_app_context()
