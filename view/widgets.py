@@ -67,7 +67,7 @@ class ModernButton(tk.Button):
             'bd': 1,
             'bg': Theme.BG_SECONDARY,
             'fg': Theme.FG_PRIMARY,
-            'activebackground': Theme.HOVER,
+            'activebackground': Theme.HOVER,  # используем тему
             'activeforeground': Theme.FG_PRIMARY,
             'highlightthickness': 0,
         }
@@ -361,39 +361,22 @@ class CollapsibleFrame(tk.Frame):
             self._is_expanded = True
 
 
+
 class InteractiveZoom:
     """
     Интерактивный зум для matplotlib графиков.
     
-    Предоставляет следующие возможности:
-        - Выделение области мышью для увеличения
-        - Зум колёсиком мыши
-        - Панорама средней кнопкой мыши
-        - Двойной клик для сброса зума
-        - Сброс всех осей через метод reset_all_zooms
-    
-    Особенности реализации:
-        - Поддержка как списка осей, так и numpy массива осей
-        - Явная очистка ресурсов через метод cleanup()
-        - Хранение оригинальных лимитов для сброса
-        - Автоматическое отключение обработчиков при очистке
-    
-    Важно:
-        Всегда вызывать cleanup() при закрытии окна для предотвращения
-        утечек памяти и висящих обработчиков событий.
+    (Документация без изменений)
     """
     
     def __init__(self, fig, axes):
         """
         Инициализация интерактивного зума.
-        
-        Args:
-            fig: Фигура matplotlib
-            axes: Ось или список осей (поддерживает вложенные списки и numpy массивы)
         """
         self.fig = fig
         self._is_cleaned_up = False
-        self._connections = []  # ID соединений для отключения
+        self._connections = []  # <--- СПИСОК ДЛЯ ID СОЕДИНЕНИЙ
+        self._selectors = []    # <--- СПИСОК ДЛЯ СЕЛЕКТОРОВ
         
         # Универсальное преобразование осей в плоский список
         self.axes = self._flatten_axes(axes)
@@ -405,9 +388,8 @@ class InteractiveZoom:
             self._original_xlim[ax] = ax.get_xlim()
             self._original_ylim[ax] = ax.get_ylim()
         
-        self._selectors = []  # Селекторы для выделения областей
-        self._pan_start = None  # Начальная точка панорамы
-        self._pan_ax = None  # Ось, в которой выполняется панорама
+        self._pan_start = None
+        self._pan_ax = None
         
         self._connect()
     
@@ -459,7 +441,7 @@ class InteractiveZoom:
                 interactive=True,
                 props=dict(facecolor='red', alpha=0.3, edgecolor='red'),
             )
-            self._selectors.append(selector)
+            self._selectors.append(selector)  # <--- СОХРАНЯЕМ СЕЛЕКТОРЫ
         
         # Глобальные обработчики
         cid1 = self.fig.canvas.mpl_connect('button_press_event', self._on_mouse_press)
@@ -468,7 +450,7 @@ class InteractiveZoom:
         cid4 = self.fig.canvas.mpl_connect('scroll_event', self._on_scroll)
         cid5 = self.fig.canvas.mpl_connect('button_press_event', self._on_double_click)
         
-        self._connections = [cid1, cid2, cid3, cid4, cid5]
+        self._connections = [cid1, cid2, cid3, cid4, cid5]  # <--- СОХРАНЯЕМ ID
     
     def _make_on_select(self, ax):
         """

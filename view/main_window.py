@@ -9,17 +9,7 @@
     - Отправку событий в контроллер
     - Обновление UI по командам контроллера
     - Отображение сообщений из очереди
-
-Архитектурные принципы:
-    - НИКАКОЙ бизнес-логики - все проверки и операции в контроллере
-    - НИКАКИХ проверок существования файлов - это ответственность контроллера
-    - Все события UI преобразуются в вызовы методов контроллера
-    - Сообщения получаются из очереди и отображаются с цветовой подсветкой
-
-Взаимодействие с контроллером:
-    - Контроллер передаётся в __init__ и вызывается для всех событий
-    - Контроллер может обновлять UI через публичные методы (update_*, set_*)
-    - Контроллер публикует сообщения в очередь, которую окно периодически опрашивает
+    - Управление цветовой темой интерфейса
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -30,46 +20,27 @@ import os
 import sys
 import subprocess
 
-from view.themes import Theme
+from view.themes import (
+    Theme, ThemeType, get_active_theme, set_active_theme,
+    get_all_themes, get_theme_name, apply_theme
+)
 from view.widgets import (
     ModernButton,
     FileEntryWidget,
     CollapsibleFrame,
 )
-from view.persistence import UIPersistence  # Сохранение состояния UI
+from view.persistence import UIPersistence
+
+try:
+    import pywinstyles
+    HAS_PYWINSTYLES = True
+except ImportError:
+    HAS_PYWINSTYLES = False
 
 
 class MainWindow:
     """
     Главное окно приложения - центральный элемент пользовательского интерфейса.
-
-    Содержит все виджеты для работы с файлами, параметрами обработки
-    и отображения результатов. Не содержит бизнес-логики - все действия
-    делегируются контроллеру.
-
-    Зоны ответственности:
-        1. Отрисовка UI и управление виджетами
-        2. Получение ввода пользователя и вызов методов контроллера
-        3. Обновление UI по команде контроллера
-        4. Отображение сообщений из очереди с цветовой подсветкой
-
-    Важные архитектурные решения:
-        - Класс НЕ ПРОВЕРЯЕТ существование файлов - это ответственность контроллера
-        - Все колбэки от виджетов вызывают методы контроллера (on_*)
-        - Контроллер обновляет UI через публичные методы (update_*, set_*)
-        - Сообщения получаются через периодический опрос очереди
-
-    Attributes:
-        _controller: Экземпляр контроллера приложения
-        _file_widgets: Словарь виджетов выбора файлов {ключ: FileEntryWidget}
-        _entry_start/end: Поля ввода временного интервала
-        _entry_angle: Поле ввода угла отсечения
-        _btn_terminate: Кнопка остановки процесса
-        _progress_bar: Индикатор выполнения
-        _status_var: Переменная статусной строки
-        _output_text: Текстовое поле для вывода сообщений
-        _interval_mode_label: Метка режима интервала (авто/ручной)
-        _TAGS: Конфигурация цветовых тегов для подсветки сообщений
     """
 
     def __init__(self, controller):
@@ -78,12 +49,11 @@ class MainWindow:
 
         Args:
             controller: Контроллер приложения для обработки событий.
-                       Все пользовательские действия будут вызывать его методы.
         """
         self._controller = controller
         self._current_stitch_target = "rover"
 
-        # UI элементы (будут созданы в _create_widgets)
+        # UI элементы
         self._root: Optional[tk.Tk] = None
         self._file_widgets: Dict[str, FileEntryWidget] = {}
         self._entry_start: Optional[tk.Entry] = None
@@ -95,42 +65,33 @@ class MainWindow:
         self._output_text: Optional[tk.Text] = None
         self._interval_mode_label: Optional[tk.Label] = None
 
-        # Конфигурация тегов для подсветки текста в консоли вывода
-        self._TAGS = {
-            'debug': Theme.DEBUG,      # Отладочные сообщения
-            'info': Theme.INFO,        # Информационные сообщения
-            'success': Theme.SUCCESS,  # Сообщения об успехе
-            'warning': Theme.WARNING,  # Предупреждения
-            'error': Theme.ERROR,      # Ошибки
-            'header': Theme.ACCENT_BLUE,  # Заголовки
-        }
+        # Для кастомного меню
+        self._menu_buttons = []
+        self._active_menu = None
+        self._menu_popups = {}
 
     # ==================== ПУБЛИЧНЫЙ API ДЛЯ КОНТРОЛЛЕРА ====================
-    # Эти методы вызываются контроллером для обновления UI
 
     def run(self) -> None:
         """Запускает главное окно и входит в главный цикл обработки событий."""
         self._create_window()
-        self._create_menu()
+        self._create_custom_menu()  # Заменяем системное меню на кастомное
         self._create_widgets()
         self._setup_styles()
         self._auto_fill_standard_files()
+        self._setup_output_tags()
 
-        self._poll_message_queue()  # Начинаем опрос очереди сообщений
+        self._poll_message_queue()
         self._root.mainloop()
 
     def quit_application(self) -> None:
-        """Корректно завершает приложение (вызывается из контроллера)."""
+        """Корректно завершает приложение."""
         if self._root:
+            UIPersistence.save()
             self._root.quit()
 
     def update_window_title(self, rover_name: str) -> None:
-        """
-        Обновляет заголовок окна с именем файла ровера.
-
-        Args:
-            rover_name: Имя файла ровера (без пути и расширения)
-        """
+        """Обновляет заголовок окна с именем файла ровера."""
         if self._root:
             if rover_name and rover_name.strip():
                 self._root.title(f"SR2NAV GUI — {rover_name} — Обработка GNSS данных")
@@ -138,12 +99,7 @@ class MainWindow:
                 self._root.title("SR2NAV GUI — Обработка GNSS данных")
 
     def get_all_file_paths(self) -> Dict[str, str]:
-        """
-        Возвращает словарь всех путей из UI.
-
-        Returns:
-            Словарь {тип_файла: путь} для виджетов, где путь не пустой
-        """
+        """Возвращает словарь всех путей из UI."""
         paths = {}
         for key, widget in self._file_widgets.items():
             value = widget.get_value()
@@ -162,39 +118,19 @@ class MainWindow:
         return widget.get_value() if widget else ""
 
     def set_file_path(self, key: str, path: str) -> None:
-        """
-        Устанавливает путь в конкретный виджет.
-
-        Используется для начальной загрузки из хранилища и после операции сшивки.
-
-        Args:
-            key: Тип файла (rover, base1, sr2nav, ...)
-            path: Путь к файлу
-        """
+        """Устанавливает путь в конкретный виджет."""
         if key in self._file_widgets and path:
             self._file_widgets[key].set_value(path)
 
     def get_cutoff_angle(self) -> float:
-        """
-        Возвращает угол отсечения из UI.
-
-        Returns:
-            Значение угла в градусах (по умолчанию 7.0 при ошибке)
-        """
+        """Возвращает угол отсечения из UI."""
         try:
             return float(self._entry_angle.get()) if self._entry_angle else 7.0
         except (ValueError, AttributeError):
             return 7.0
 
     def update_time_interval(self, start: str, end: str, is_manual: bool = False) -> None:
-        """
-        Обновляет поля временного интервала и индикатор режима.
-
-        Args:
-            start: Начало интервала в формате "HH:MM:SS"
-            end: Конец интервала в формате "HH:MM:SS"
-            is_manual: True если интервал установлен вручную, False если из Interval.exe
-        """
+        """Обновляет поля временного интервала и индикатор режима."""
         if self._entry_start:
             self._entry_start.delete(0, tk.END)
             self._entry_start.insert(0, start)
@@ -217,12 +153,7 @@ class MainWindow:
                 self._append_output(f"⏱ Интервал (авто): {start} - {end}", "info")
 
     def set_processing_state(self, is_processing: bool) -> None:
-        """
-        Устанавливает состояние обработки (индикация выполнения).
-
-        Args:
-            is_processing: True если идёт обработка, False если остановлено
-        """
+        """Устанавливает состояние обработки (индикация выполнения)."""
         if is_processing:
             self._status_var.set("⏳ Выполнение операции...")
             self._progress_bar.start(10)
@@ -235,12 +166,7 @@ class MainWindow:
                 self._btn_terminate.config(state="disabled")
 
     def set_status(self, message: str):
-        """
-        Устанавливает текст в статусной строке.
-
-        Args:
-            message: Текст статуса
-        """
+        """Устанавливает текст в статусной строке."""
         if self._status_var:
             self._status_var.set(message)
 
@@ -253,13 +179,7 @@ class MainWindow:
             self._root.after(2000, lambda: self.set_status("✅ Готов к работе"))
 
     def show_error(self, title: str, message: str):
-        """
-        Показывает модальное сообщение об ошибке.
-
-        Args:
-            title: Заголовок окна
-            message: Текст ошибки
-        """
+        """Показывает модальное сообщение об ошибке."""
         messagebox.showerror(title, message, parent=self._root)
 
     @property
@@ -267,16 +187,215 @@ class MainWindow:
         """Возвращает корневое окно Tkinter для использования в диалогах."""
         return self._root
 
+    # ==================== КАСТОМНОЕ МЕНЮ ====================
+
+    def _create_custom_menu(self) -> None:
+        """Создаёт кастомное меню вместо системного."""
+        # Контейнер для меню
+        menu_bar = tk.Frame(
+            self._root,
+            bg=Theme.BG_SECONDARY,
+            height=30,
+            highlightbackground=Theme.BORDER,
+            highlightthickness=1
+        )
+        menu_bar.pack(fill=tk.X)
+        menu_bar.pack_propagate(False)
+
+        # Словарь с пунктами меню и их подменю
+        menu_items = {
+            "📁 Файл": [
+                ("📂 Открыть рабочий каталог", self._on_open_working_dir),
+                None,  # Разделитель
+                ("🚪 Выход", self._on_exit)
+            ],
+            "📊 Анализ": [
+                ("📈 Анализ скоростей (VEL)", self._controller.on_analyze_velocities),
+                ("🛰️ Анализ GPS созвездия", self._controller.on_analyze_gps_constellation)
+            ],
+            "🔧 Инструменты": [
+                ("🔄 Трансформация в TBL", self._on_show_transform_dialog),
+                ("🚫 Исключение спутников", self._controller.on_show_gps_exclusion_dialog),
+                None,
+                ("🧹 Очистить рабочую директорию", self._controller.on_cleanup_working_directory)
+            ],
+            "👁️ Вид": [
+                # Подменю для темы будет отдельно
+            ],
+            "❓ Справка": [
+                ("ℹ️ О программе", self._on_about)
+            ]
+        }
+
+        # Создаем кнопки для каждого пункта меню
+        for menu_text in menu_items.keys():
+            btn = tk.Button(
+                menu_bar,
+                text=menu_text,
+                font=("Segoe UI", 10),
+                bg=Theme.BG_SECONDARY,
+                fg=Theme.FG_PRIMARY,
+                activebackground=Theme.HOVER,
+                activeforeground=Theme.FG_PRIMARY,
+                relief=tk.FLAT,
+                bd=0,
+                padx=15,
+                pady=2,
+                cursor="hand2"
+            )
+            btn.pack(side=tk.LEFT, padx=2)
+            
+            # Привязываем события для показа подменю
+            btn.bind("<Enter>", lambda e, m=menu_text, items=menu_items[menu_text]: self._show_menu(e, m, items))
+            btn.bind("<Leave>", self._hide_menu_delayed)
+            
+            self._menu_buttons.append(btn)
+
+        # Добавляем выбор темы отдельно
+        theme_btn = tk.Button(
+            menu_bar,
+            text="🎨",
+            font=("Segoe UI", 12),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
+            activebackground=Theme.HOVER,
+            activeforeground=Theme.FG_PRIMARY,
+            relief=tk.FLAT,
+            bd=0,
+            padx=10,
+            pady=2,
+            cursor="hand2"
+        )
+        theme_btn.pack(side=tk.RIGHT, padx=5)
+        theme_btn.bind("<Button-1>", self._show_theme_menu)
+
+        # Метка для версии
+        version_label = tk.Label(
+            menu_bar,
+            text="v1.0",
+            font=("Segoe UI", 9),
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_SECONDARY
+        )
+        version_label.pack(side=tk.RIGHT, padx=10)
+
+    def _show_menu(self, event, menu_title: str, items: list) -> None:
+        """Показывает всплывающее меню."""
+        # Скрываем предыдущее меню
+        self._hide_menu()
+        
+        # Создаем новое меню
+        menu = tk.Menu(
+            self._root,
+            tearoff=0,
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
+            activebackground=Theme.HOVER,
+            activeforeground=Theme.FG_PRIMARY,
+            borderwidth=1,
+            relief=tk.SOLID
+        )
+        
+        for item in items:
+            if item is None:
+                menu.add_separator()
+            else:
+                text, command = item
+                menu.add_command(
+                    label=text,
+                    command=command,
+                    font=("Segoe UI", 10)
+                )
+        
+        # Показываем меню под кнопкой
+        try:
+            x = event.widget.winfo_rootx()
+            y = event.widget.winfo_rooty() + event.widget.winfo_height()
+            menu.tk_popup(x, y)
+            self._active_menu = menu
+        except:
+            pass
+
+    def _show_theme_menu(self, event):
+        """Показывает меню выбора темы."""
+        menu = tk.Menu(
+            self._root,
+            tearoff=0,
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
+            activebackground=Theme.HOVER,
+            activeforeground=Theme.FG_PRIMARY,
+            borderwidth=1,
+            relief=tk.SOLID
+        )
+        
+        themes = get_all_themes()
+        current_theme = UIPersistence.get_theme()
+        
+        for theme_type, theme_name in themes.items():
+            prefix = "✓ " if theme_type == current_theme else "  "
+            menu.add_command(
+                label=f"{prefix}{theme_name}",
+                command=lambda t=theme_type: self._on_theme_selected(t),
+                font=("Segoe UI", 10)
+            )
+        
+        try:
+            x = event.widget.winfo_rootx()
+            y = event.widget.winfo_rooty() + event.widget.winfo_height()
+            menu.tk_popup(x, y)
+            self._active_menu = menu
+        except:
+            pass
+
+    def _hide_menu(self, event=None):
+        """Скрывает активное меню."""
+        if self._active_menu:
+            try:
+                self._active_menu.unpost()
+            except:
+                pass
+            self._active_menu = None
+
+    def _hide_menu_delayed(self, event):
+        """Скрывает меню с небольшой задержкой."""
+        self._root.after(200, self._hide_menu)
+
     # ==================== ПРИВАТНЫЕ МЕТОДЫ СОЗДАНИЯ UI ====================
 
     def _create_window(self) -> None:
         """Создаёт главное окно с базовыми параметрами."""
         self._root = tk.Tk()
+        
+        # Загружаем сохранённую тему
+        saved_theme = UIPersistence.get_theme()
+        set_active_theme(saved_theme)
+        
+        # Применяем тему к окну
+        if hasattr(self._root, 'tk'):
+            try:
+                self._root.tk.call('tk', 'theme_use', 'clam')
+            except:
+                pass
+        
+        # Пытаемся применить тёмный заголовок для Windows
+        if HAS_PYWINSTYLES:
+            try:
+                pywinstyles.apply_style(self._root, 'dark')
+            except Exception as e:
+                print(f"Не удалось применить тёмный заголовок: {e}")
+        
         self._root.title("SR2NAV GUI — Обработка GNSS данных")
-        self._root.geometry("1400x850")
+        
+        # Загружаем сохранённый размер окна
+        width, height = UIPersistence.get_window_size()
+        self._root.geometry(f"{width}x{height}")
         self._root.minsize(1400, 850)
         self._root.configure(bg=Theme.BG_PRIMARY)
-
+        
+        # Привязываем событие изменения размера для сохранения
+        self._root.bind('<Configure>', self._on_window_resize)
+        
         self._center_window()
         self._root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -289,8 +408,15 @@ class MainWindow:
         y = (self._root.winfo_screenheight() // 2) - (height // 2)
         self._root.geometry(f'{width}x{height}+{x}+{y}')
 
+    def _on_window_resize(self, event):
+        """Обработчик изменения размера окна."""
+        if event.widget == self._root:
+            if event.width > 100 and event.height > 100:
+                UIPersistence.set_window_size(event.width, event.height)
+
     def _on_closing(self):
-        """Обработчик закрытия окна - делегирует контроллеру."""
+        """Обработчик закрытия окна."""
+        UIPersistence.save()
         self._controller.on_app_closing()
 
     def _setup_styles(self) -> None:
@@ -304,60 +430,82 @@ class MainWindow:
             bordercolor=Theme.BORDER,
         )
 
-    def _create_menu(self) -> None:
-        """Создаёт главное меню приложения."""
-        menubar = tk.Menu(self._root)
-        self._root.config(menu=menubar)
+    def _setup_output_tags(self) -> None:
+        """Настраивает цветовые теги для консоли вывода."""
+        if self._output_text:
+            for tag in self._output_text.tag_names():
+                self._output_text.tag_delete(tag)
+            
+            self._output_text.tag_config("debug", foreground=Theme.DEBUG)
+            self._output_text.tag_config("info", foreground=Theme.INFO)
+            self._output_text.tag_config("success", foreground=Theme.SUCCESS)
+            self._output_text.tag_config("warning", foreground=Theme.WARNING)
+            self._output_text.tag_config("error", foreground=Theme.ERROR, font=("Consolas", 11, "bold"))
+            self._output_text.tag_config("header", foreground=Theme.ACCENT_BLUE, font=("Consolas", 11, "bold"))
 
-        # Меню "Файл"
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="📁  Файл", menu=file_menu)
-        file_menu.add_command(label="📂     Открыть рабочий каталог", command=self._on_open_working_dir)
-        file_menu.add_separator()
-        file_menu.add_command(label="🚪     Выход", command=self._on_exit)
+    def _on_theme_selected(self, theme_type: ThemeType) -> None:
+        """Обработчик выбора темы."""
+        UIPersistence.set_theme(theme_type)
+        UIPersistence.save()
+        set_active_theme(theme_type)
+        self._apply_theme_to_all_widgets()
+        theme_name = get_theme_name(theme_type)
+        self._append_output(f"🎨 Тема изменена: {theme_name}", "info")
 
-        # Меню "Анализ"
-        analysis_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="📊  Анализ", menu=analysis_menu)
-        analysis_menu.add_command(
-            label="📈     Анализ скоростей (VEL)",
-            command=self._controller.on_analyze_velocities
-        )
-        analysis_menu.add_command(
-            label="🛰️Анализ GPS созвездия",
-            command=self._controller.on_analyze_gps_constellation
-        )
+    def _apply_theme_to_all_widgets(self) -> None:
+        """Рекурсивно применяет текущую тему ко всем виджетам."""
+        try:
+            apply_theme(self._root, get_active_theme())
+            self._update_widgets_colors(self._root)
+            self._root.update_idletasks()
+            self._setup_output_tags()
+        except Exception as e:
+            print(f"Ошибка применения темы: {e}")
 
-        # Меню "Инструменты"
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="🔧 Инструменты", menu=tools_menu)
-        tools_menu.add_command(
-            label="🔄     Трансформация в TBL",
-            command=self._on_show_transform_dialog
-        )
-        tools_menu.add_command(
-            label="🚫     Исключение спутников",
-            command=self._controller.on_show_gps_exclusion_dialog
-        )
-        tools_menu.add_separator()
-        tools_menu.add_command(
-            label="🧹     Очистить рабочую директорию",
-            command=self._controller.on_cleanup_working_directory
-        )
-
-        # Меню "Вид"
-        view_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="👁️  Вид", menu=view_menu)
-        #view_menu.add_command(label="🧹     Очистить вывод", command=self.clear_output)
-
-        # Меню "Справка"
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="❓ Справка", menu=help_menu)
-        help_menu.add_command(label="ℹ️ О программе", command=self._on_about)
-
-    def _on_exit(self):
-        """Обработчик выхода из меню."""
-        self._on_closing()
+    def _update_widgets_colors(self, widget):
+        """Рекурсивно обновляет цвета виджетов."""
+        try:
+            if isinstance(widget, (tk.Frame, tk.LabelFrame, tk.Canvas, tk.Button)):
+                try:
+                    current_bg = widget.cget('bg')
+                    if current_bg in ('SystemButtonFace', 'SystemWindow', '#f0f0f0'):
+                        widget.configure(bg=Theme.BG_PRIMARY)
+                except:
+                    pass
+            
+            if isinstance(widget, tk.Label):
+                try:
+                    if widget.cget('bg') in ('SystemButtonFace', 'SystemWindow', '#f0f0f0'):
+                        widget.configure(bg=Theme.BG_PRIMARY)
+                except:
+                    pass
+            
+            if isinstance(widget, tk.Entry):
+                try:
+                    widget.configure(
+                        bg=Theme.BG_SECONDARY,
+                        fg=Theme.FG_PRIMARY,
+                        highlightcolor=Theme.ACCENT_BLUE
+                    )
+                except:
+                    pass
+            
+            if isinstance(widget, tk.Button) and widget not in self._menu_buttons:
+                try:
+                    widget.configure(
+                        bg=Theme.BG_SECONDARY,
+                        fg=Theme.FG_PRIMARY,
+                        activebackground=Theme.HOVER,
+                        activeforeground=Theme.FG_PRIMARY
+                    )
+                except:
+                    pass
+            
+            for child in widget.winfo_children():
+                self._update_widgets_colors(child)
+                
+        except Exception:
+            pass
 
     def _create_widgets(self) -> None:
         """Создаёт все виджеты главного окна."""
@@ -373,7 +521,7 @@ class MainWindow:
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
         left.pack_propagate(False)
 
-        self._create_files_panel(left)      # здесь создаются _file_widgets
+        self._create_files_panel(left)
         self._create_params_panel(left)
 
         right = tk.Frame(content, bg=Theme.BG_PRIMARY)
@@ -383,17 +531,25 @@ class MainWindow:
 
         self._create_status_panel(main)
 
-        # ВЫЗЫВАЕМ КОНТРОЛЛЕР ПОСЛЕ СОЗДАНИЯ ВСЕХ ВИДЖЕТОВ
         self._controller.on_window_ready()
 
     def _create_top_panel(self, parent) -> None:
         """Создаёт верхнюю панель с заголовком и кнопками действий."""
-        frame = tk.Frame(parent, bg=Theme.BG_SECONDARY, height=70)
+        frame = tk.Frame(
+            parent, 
+            bg=Theme.BG_SECONDARY,
+            height=70,
+            highlightbackground=Theme.BORDER,
+            highlightthickness=1
+        )
         frame.pack(fill=tk.X)
         frame.pack_propagate(False)
 
         self._create_title_section(frame)
         self._create_action_buttons(frame)
+        
+        separator = tk.Frame(parent, bg=Theme.BORDER, height=1)
+        separator.pack(fill=tk.X)
 
     def _create_title_section(self, parent) -> None:
         """Создаёт секцию с заголовком приложения."""
@@ -472,7 +628,12 @@ class MainWindow:
         frame = CollapsibleFrame(parent, title="📁 Входные файлы")
         frame.pack(fill=tk.X, pady=(0, 10))
 
-        frame._header.children['!label'].configure(font=("Segoe UI", 12, "bold"))
+        if hasattr(frame, '_header'):
+            frame._header.configure(bg=Theme.BG_TERTIARY)
+        if hasattr(frame, '_title_label'):
+            frame._title_label.configure(bg=Theme.BG_TERTIARY)
+        if hasattr(frame, '_toggle_btn'):
+            frame._toggle_btn.configure(bg=Theme.BG_TERTIARY)
 
         content = tk.Frame(frame.content, bg=Theme.BG_PRIMARY)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -505,15 +666,24 @@ class MainWindow:
         """Создаёт панель параметров обработки."""
         frame = CollapsibleFrame(parent, title="⚙️ Параметры обработки")
         frame.pack(fill=tk.X, pady=(0, 10))
-
+        
+        if hasattr(frame, '_header'):
+            frame._header.configure(bg=Theme.BG_TERTIARY)
+        if hasattr(frame, '_title_label'):
+            frame._title_label.configure(bg=Theme.BG_TERTIARY)
+        if hasattr(frame, '_toggle_btn'):
+            frame._toggle_btn.configure(bg=Theme.BG_TERTIARY)
+        
+        frame.content.configure(bg=Theme.BG_PRIMARY)
+        
         content = tk.Frame(frame.content, bg=Theme.BG_PRIMARY)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
+        
         self._create_time_interval_section(content)
         self._create_angle_section(content)
 
     def _create_time_interval_section(self, parent):
-        """Создаёт секцию временного интервала с полями ввода и кнопкой подтверждения."""
+        """Создаёт секцию временного интервала."""
         time_frame = tk.Frame(parent, bg=Theme.BG_PRIMARY)
         time_frame.pack(fill=tk.X, pady=8)
 
@@ -530,7 +700,8 @@ class MainWindow:
             time_frame,
             text="Начало:",
             font=("Segoe UI", 10),
-            bg=Theme.BG_PRIMARY
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
         ).pack(side=tk.LEFT, padx=(0, 1))
 
         self._entry_start = tk.Entry(
@@ -541,17 +712,17 @@ class MainWindow:
             fg=Theme.FG_PRIMARY,
             bd=1,
             relief=tk.SOLID,
+            highlightcolor=Theme.ACCENT_BLUE,
+            highlightthickness=1,
         )
         self._entry_start.pack(side=tk.LEFT, padx=(0, 12))
-        # Убираем привязку событий к клавишам и фокусу
-        # self._entry_start.bind('<KeyRelease>', self._on_interval_changed)
-        # self._entry_start.bind('<FocusOut>', self._on_interval_changed)
 
         tk.Label(
             time_frame,
             text="Конец:",
             font=("Segoe UI", 10),
-            bg=Theme.BG_PRIMARY
+            bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
         ).pack(side=tk.LEFT, padx=(0, 1))
 
         self._entry_end = tk.Entry(
@@ -562,13 +733,11 @@ class MainWindow:
             fg=Theme.FG_PRIMARY,
             bd=1,
             relief=tk.SOLID,
+            highlightcolor=Theme.ACCENT_BLUE,
+            highlightthickness=1,
         )
         self._entry_end.pack(side=tk.LEFT, padx=(0, 10))
-        # Убираем привязку событий к клавишам и фокусу
-        # self._entry_end.bind('<KeyRelease>', self._on_interval_changed)
-        # self._entry_end.bind('<FocusOut>', self._on_interval_changed)
 
-        # Кнопка подтверждения ручного ввода (дискета)
         self._btn_interval_confirm = ModernButton(
             time_frame,
             text="💾",
@@ -594,26 +763,16 @@ class MainWindow:
         tk.Frame(parent, height=1, bg=Theme.BORDER).pack(fill=tk.X, pady=12)
 
     def _on_interval_confirm(self):
-        """
-        Обработчик кнопки подтверждения ручного ввода интервала.
-        Вызывается только при явном нажатии на кнопку с дискетой.
-        Поддерживает формат GPS времени: YYYY:MM:DD:HH:MM:SS.f
-        """
+        """Обработчик кнопки подтверждения ручного ввода интервала."""
         if not self._entry_start or not self._entry_end:
             return
 
         start = self._entry_start.get().strip()
         end = self._entry_end.get().strip()
 
-        # Валидация формата GPS времени
         if start and end:
-            # Паттерн для GPS времени: YYYY:MM:DD:HH:MM:SS.0 (или с другим числом после точки)
-            # Год: 4 цифры, месяц: 2, день: 2, часы: 2, минуты: 2, секунды: 2, точка, дробная часть
             import re
-            # Более строгий паттерн
             gps_time_pattern = r'^\d{4}:\d{2}:\d{2}:\d{2}:\d{2}:\d{2}\.\d+$'
-            # Или более мягкий паттерн, который допускает разные варианты
-            gps_time_pattern_loose = r'^\d{4}:\d{2}:\d{2}:\d{2}:\d{2}:\d{2}(\.\d+)?$'
             
             if not re.match(gps_time_pattern, start):
                 self._append_output(
@@ -633,18 +792,13 @@ class MainWindow:
                 )
                 return
 
-        # Передаём в контроллер
         self._controller.on_interval_manually_changed(start, end)
-        
-        # Визуальная обратная связь - мигание кнопки
         self._btn_interval_confirm.config(bg=Theme.ACCENT_GREEN)
         self._root.after(200, lambda: self._btn_interval_confirm.config(bg=Theme.ACCENT_BLUE))
-        
-        # Показываем подтверждение в консоли
         self._append_output(f"💾 Интервал сохранён: {start} - {end}", "success")
 
     def _create_angle_section(self, parent):
-        """Создаёт секцию угла отсечения с кнопкой исключения спутников."""
+        """Создаёт секцию угла отсечения."""
         angle_frame = tk.Frame(parent, bg=Theme.BG_PRIMARY)
         angle_frame.pack(fill=tk.X, pady=8)
 
@@ -653,6 +807,7 @@ class MainWindow:
             text="📐 Угол отсечения:",
             font=("Segoe UI", 11, "bold"),
             bg=Theme.BG_PRIMARY,
+            fg=Theme.FG_PRIMARY,
             width=18,
             anchor="w",
         ).pack(side=tk.LEFT)
@@ -666,6 +821,8 @@ class MainWindow:
             fg=Theme.ACCENT_BLUE,
             bd=1,
             relief=tk.SOLID,
+            highlightcolor=Theme.ACCENT_BLUE,
+            highlightthickness=1,
         )
         self._entry_angle.pack(side=tk.LEFT, padx=(0, 5))
         self._entry_angle.insert(0, "7.0")
@@ -690,8 +847,15 @@ class MainWindow:
         ).pack(side=tk.LEFT)
 
     def _create_output_panel(self, parent) -> None:
-        """Создаёт панель вывода сообщений с заголовком и кнопками."""
-        frame = tk.Frame(parent, bg=Theme.BG_SECONDARY, bd=1, relief=tk.SOLID)
+        """Создаёт панель вывода сообщений."""
+        frame = tk.Frame(
+            parent, 
+            bg=Theme.BG_SECONDARY, 
+            bd=1, 
+            relief=tk.SOLID,
+            highlightbackground=Theme.BORDER,
+            highlightthickness=1
+        )
         frame.pack(fill=tk.BOTH, expand=True)
 
         self._create_output_header(frame)
@@ -699,7 +863,7 @@ class MainWindow:
         self._print_welcome()
 
     def _create_output_header(self, parent):
-        """Создаёт заголовок панели вывода с кнопками."""
+        """Создаёт заголовок панели вывода."""
         header = tk.Frame(parent, bg=Theme.BG_SECONDARY)
         header.pack(fill=tk.X, padx=12, pady=8)
 
@@ -730,12 +894,12 @@ class MainWindow:
         ).pack(side=tk.RIGHT, padx=2)
 
     def _create_output_text_area(self, parent):
-        """Создаёт текстовую область для вывода с прокруткой."""
+        """Создаёт текстовую область для вывода."""
         self._output_text = tk.Text(
             parent,
             wrap=tk.WORD,
             font=("Consolas", 11),
-            bg="white",
+            bg=Theme.BG_SECONDARY,
             fg=Theme.FG_PRIMARY,
             relief=tk.FLAT,
             padx=12,
@@ -748,18 +912,15 @@ class MainWindow:
         self._output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Настройка тегов для подсветки разных типов сообщений
-        for tag_name, color in self._TAGS.items():
-            if tag_name == 'error':
-                self._output_text.tag_config(tag_name, foreground=color, font=("Consolas", 11, "bold"))
-            elif tag_name == 'header':
-                self._output_text.tag_config(tag_name, foreground=color, font=("Consolas", 11, "bold"))
-            else:
-                self._output_text.tag_config(tag_name, foreground=color)
-
     def _create_status_panel(self, parent) -> None:
-        """Создаёт нижнюю панель статуса с прогресс-баром."""
-        frame = tk.Frame(parent, bg=Theme.BG_SECONDARY, height=32)
+        """Создаёт нижнюю панель статуса."""
+        frame = tk.Frame(
+            parent, 
+            bg=Theme.BG_SECONDARY, 
+            height=32,
+            highlightbackground=Theme.BORDER,
+            highlightthickness=1
+        )
         frame.pack(fill=tk.X)
         frame.pack_propagate(False)
 
@@ -782,19 +943,9 @@ class MainWindow:
         ).pack(side=tk.RIGHT, padx=20)
 
     # ==================== ОБРАБОТЧИКИ СОБЫТИЙ UI ====================
-    # Эти методы вызываются виджетами и делегируют действия контроллеру
 
     def _on_browse_file(self, key: str, extension: str) -> str:
-        """
-        Открывает диалог выбора файла и ВОЗВРАЩАЕТ путь.
-
-        Args:
-            key: Тип файла (rover, base1, sr2nav, ...)
-            extension: Ожидаемое расширение файла
-
-        Returns:
-            Выбранный путь или пустая строка
-        """
+        """Открывает диалог выбора файла."""
         initial_dir = UIPersistence.get_last_dir()
         if not initial_dir:
             initial_dir = self._controller.script_dir
@@ -812,12 +963,7 @@ class MainWindow:
         return path or ""
 
     def _on_stitch_files(self, source_key: str = "rover") -> None:
-        """
-        Обработчик сшивания JPS файлов.
-
-        Args:
-            source_key: Ключ поля, куда установить результат (rover/base1/base2)
-        """
+        """Обработчик сшивания JPS файлов."""
         self._current_stitch_target = source_key
 
         initial_dir = UIPersistence.get_last_dir()
@@ -857,7 +1003,7 @@ class MainWindow:
             )
 
     def _on_open_working_dir(self) -> None:
-        """Открывает рабочий каталог в системном файловом менеджере."""
+        """Открывает рабочий каталог в файловом менеджере."""
         path = self._controller.script_dir
 
         if not os.path.exists(path):
@@ -891,7 +1037,7 @@ class MainWindow:
         dialog.show()
 
     def _on_about(self) -> None:
-        """Показывает диалог 'О программе' с информацией о версии."""
+        """Показывает диалог 'О программе'."""
         from core.app_context import APP_CONTEXT
 
         about_text = f"""
@@ -916,41 +1062,8 @@ class MainWindow:
             parent=self._root
         )
 
-    def _on_interval_changed(self, event=None):
-        """
-        Вызывается при изменении полей интервала пользователем.
-        Передаёт новые значения в контроллер ТОЛЬКО если они реально изменились.
-        """
-        if not self._entry_start or not self._entry_end:
-            return
-
-        new_start = self._entry_start.get().strip()
-        new_end = self._entry_end.get().strip()
-
-        # Получаем текущие значения, которые хранятся в контроллере через FileManager
-        # Это более надежный способ, чем хранить их в самом виджете.
-        # Для этого нужно будет добавить метод в контроллер, но чтобы не усложнять,
-        # будем считать, что если поля пустые, то это сброс.
-        # В качестве простого решения для предотвращения ложных срабатываний,
-        # будем использовать атрибуты самого виджета для хранения предыдущего значения.
-        if not hasattr(self, '_last_interval_start'):
-            self._last_interval_start = ""
-            self._last_interval_end = ""
-
-        # Проверяем, изменилось ли значение
-        if new_start == self._last_interval_start and new_end == self._last_interval_end:
-            # Значение не изменилось, игнорируем событие
-            return
-
-        # Обновляем сохраненные значения
-        self._last_interval_start = new_start
-        self._last_interval_end = new_end
-
-        # Передаем в контроллер только при реальном изменении
-        self._controller.on_interval_manually_changed(new_start, new_end)
-
     def _on_terminate_with_confirmation(self):
-        """Останавливает текущий процесс с подтверждением пользователя."""
+        """Останавливает текущий процесс с подтверждением."""
         result = messagebox.askyesno(
             "⏹ Подтверждение остановки",
             "Вы действительно хотите остановить текущий процесс?\n\n"
@@ -975,10 +1088,14 @@ class MainWindow:
             self.set_status("📋 Скопировано")
             self._root.after(2000, lambda: self.set_status("✅ Готов к работе"))
 
+    def _on_exit(self):
+        """Обработчик выхода."""
+        self._on_closing()
+
     # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
 
     def _auto_fill_standard_files(self) -> None:
-        """Автоматически заполняет стандартные файлы, если они существуют в рабочей директории."""
+        """Автоматически заполняет стандартные файлы."""
         from core.app_context import APP_CONTEXT
 
         auto_map = {
@@ -994,13 +1111,7 @@ class MainWindow:
                 UIPersistence.update_from_path(str(path))
 
     def _poll_message_queue(self) -> None:
-        """
-        Периодически опрашивает очередь сообщений контроллера.
-
-        Извлекает сообщения из очереди и отображает их в консоли вывода
-        с соответствующей цветовой подсветкой. Обрабатывает до 20 сообщений
-        за один цикл, чтобы не блокировать UI.
-        """
+        """Опрашивает очередь сообщений контроллера."""
         try:
             queue = self._controller.message_queue
             processed = 0
@@ -1018,19 +1129,13 @@ class MainWindow:
         self._root.after(100, self._poll_message_queue)
 
     def _append_output(self, text: str, tag: str = None) -> None:
-        """
-        Добавляет текст в консоль вывода с указанным тегом подсветки.
-
-        Args:
-            text: Текст для добавления
-            tag: Тег подсветки (debug, info, success, warning, error, header)
-        """
+        """Добавляет текст в консоль вывода."""
         if self._output_text:
             self._output_text.insert(tk.END, text + "\n", tag if tag else ())
             self._output_text.see(tk.END)
 
     def _print_welcome(self) -> None:
-        """Выводит приветственное сообщение в консоль при запуске."""
+        """Выводит приветственное сообщение."""
         from core.app_context import APP_CONTEXT
 
         welcome = f"""

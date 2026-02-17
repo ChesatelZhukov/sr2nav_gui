@@ -156,10 +156,10 @@ class GPSExclusionDialog:
                 row_frame if col == 0 else row_frame,
                 text=sat,
                 variable=var,
-                bg=Theme.BG_PRIMARY,
-                fg=Theme.FG_PRIMARY,
-                activebackground=Theme.HOVER,
-                selectcolor="white",
+                bg=Theme.BG_PRIMARY,  # было "#FFB6C1"
+                fg=Theme.FG_PRIMARY,  # было "#000000"
+                activebackground=Theme.HOVER,  # было "#FF1493"
+                selectcolor="white",  # это оставляем
                 font=("Consolas", 10),
             )
             cb.grid(row=0, column=col, padx=10, pady=2)
@@ -263,10 +263,10 @@ class TransformFileDialog:
     
     # Типы файлов для трансформации с описаниями для UI
     FILE_TYPES = [
-        ("Phase_L1.VEL", "ROVER_KIN", "📊 Фаза L1"),
-        ("Phase_IO.VEL", "ROVER_KIN", "📊 Фаза IO"),
-        ("PhaseIOS.VEL", "ROVER_KIN", "📊 Фаза IOS"),
-        ("PhaseL1S.VEL", "ROVER_KIN", "📊 Фаза L1S"),
+        ("Phase_L1.VEL", "ROVER_KIN", "📊 Фазовое L1"),
+        ("Phase_IO.VEL", "ROVER_KIN", "📊 Фазовое IO"),
+        ("PhaseIOS.VEL", "ROVER_KIN", "📊 Фазовое IOS"),
+        ("PhaseL1S.VEL", "ROVER_KIN", "📊 Фазовое L1S"),
         ("Base_Std.QC", "BASE_STD", "🏠 Стандарт базы"),
         ("Rover_Std.QC", "ROVER_STD", "🚙 Стандарт ровера"),
     ]
@@ -364,12 +364,12 @@ class TransformFileDialog:
             dir_container,
             textvariable=self._dir_var,
             font=("Consolas", 10),
-            bg=Theme.BG_SECONDARY,
-            fg=Theme.FG_PRIMARY,
+            bg=Theme.BG_SECONDARY,  # было "white"
+            fg=Theme.FG_PRIMARY,    # было "black"
             relief=tk.SOLID,
             bd=1,
             state='readonly',
-            readonlybackground=Theme.BG_SECONDARY,
+            readonlybackground=Theme.BG_SECONDARY,  # было "white"
         )
         self._dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         

@@ -17,6 +17,7 @@
     - Универсальная обработка данных (поддержка dict и объектов)
     - Все операции делегируются контроллеру
     - Состояние UI сохраняется через UIPersistence
+    - Все цвета берутся из централизованной темы (themes.py)
 """
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -28,12 +29,45 @@ from datetime import datetime
 from pathlib import Path
 import pyperclip
 import math
+import gc
+import weakref
+import logging
 
 from view.themes import Theme
 from view.widgets import ModernButton, InteractiveZoom
 from core.app_context import APP_CONTEXT
 
-class VelocityAnalysisWindow:
+logger = logging.getLogger(__name__)
+
+
+class InstanceCounter:
+    """
+    Класс-помощник для подсчета экземпляров и отслеживания утечек памяти.
+    """
+    _instances = weakref.WeakSet()
+    _count = 0
+    
+    def __init__(self):
+        self.__class__._count += 1
+        self.instance_id = self.__class__._count
+        self.__class__._instances.add(self)
+        logger.debug(f"[{self.__class__.__name__}] Создан экземпляр #{self.instance_id}. Активных: {self.get_instance_count()}, Всего создано: {self.get_total_created()}")
+    
+    def __del__(self):
+        logger.debug(f"[{self.__class__.__name__}] Экземпляр #{getattr(self, 'instance_id', 'N/A')} удаляется.")
+    
+    @classmethod
+    def get_instance_count(cls):
+        """Возвращает количество активных (живых) экземпляров."""
+        return len(cls._instances)
+    
+    @classmethod
+    def get_total_created(cls):
+        """Возвращает общее количество созданных экземпляров за все время."""
+        return cls._count
+
+
+class VelocityAnalysisWindow(InstanceCounter):
     """
     Окно отображения результатов анализа скоростей.
     
@@ -55,6 +89,7 @@ class VelocityAnalysisWindow:
         - Автоматическое прореживание графиков для производительности (>1000 точек)
         - Синхронизация видимости графиков с чекбоксами
         - **Новый график для визуализации 4-й разности высоты**
+        - Все цвета берутся из централизованной темы
     
     Атрибуты:
         parent: Родительское окно (MainWindow)
@@ -68,6 +103,20 @@ class VelocityAnalysisWindow:
         file_vars: Словарь переменных чекбоксов для выбора файлов
     """
     
+    # Цвета для графиков - берутся из темы
+    PLOT_COLORS = [
+        Theme.ACCENT_RED,
+        Theme.ACCENT_GREEN,
+        Theme.WARNING,
+        Theme.INFO,
+        Theme.ACCENT_ORANGE,
+        Theme.ACCENT_PURPLE,
+        Theme.ACCENT_CYAN,
+        Theme.DEBUG,
+        Theme.SUCCESS,
+        Theme.FG_SECONDARY,
+    ]
+    
     def __init__(self, parent, controller):
         """
         Инициализация окна анализа скоростей.
@@ -76,6 +125,7 @@ class VelocityAnalysisWindow:
             parent: Родительское окно (MainWindow)
             controller: Контроллер приложения для делегирования операций
         """
+        super().__init__()  # Вызов конструктора InstanceCounter
         self.parent = parent
         self.controller = controller
         self.current_dir = None
@@ -83,6 +133,7 @@ class VelocityAnalysisWindow:
         
         # Данные
         self.analysis_results = None
+        self.summary_results = None
         self.interactive_zoom = None
         self.current_fig = None
         self.current_canvas = None
@@ -91,10 +142,25 @@ class VelocityAnalysisWindow:
         # Переменные для выбора файлов
         self.file_vars: Dict[str, tk.BooleanVar] = {}
         
+        # UI элементы
+        self._project_var = None
+        self._project_combo = None
+        self.progress_frame = None
+        self.progress_label = None
+        self.progress_bar = None
+        self.status_label = None
+        self.file_count_label = None
+        self.file_frame = None
+        self.file_container = None
+        self.notebook = None
+        self.plot_frame = None
+        self.table_frame = None
+        self.summary_frame = None
+        
         # Создаем окно
         self.window = tk.Toplevel(parent)
         self.window.title("Анализ скоростей VEL файлов")
-        self.window.geometry("1600x1100")  # Увеличил размер для 5-ти графиков
+        self.window.geometry("1600x1100")
         self.window.minsize(1400, 900)
         self.window.configure(bg=Theme.BG_PRIMARY)
         
@@ -103,25 +169,47 @@ class VelocityAnalysisWindow:
         
         self.create_widgets()
         self._scan_available_projects()  # Сканируем проекты при открытии
+        
+        # Захватываем фокус, чтобы окно было модальным
+        self.window.grab_set()
     
     def on_close(self):
-        """Закрытие окна с очисткой ресурсов matplotlib."""
+        """
+        Закрытие окна с полной очисткой ресурсов matplotlib и обработчиков.
+        """
+        logger.info(f"Закрытие окна VelocityAnalysisWindow #{getattr(self, 'instance_id', 'N/A')}")
         try:
-            # Очищаем интерактивный зум
-            if hasattr(self, 'interactive_zoom') and self.interactive_zoom:
+            # 1. Очищаем интерактивный зум (отключает обработчики событий)
+            if self.interactive_zoom:
                 self.interactive_zoom.cleanup()
                 self.interactive_zoom = None
             
-            # Закрываем фигуру matplotlib для освобождения памяти
-            if hasattr(self, 'current_fig') and self.current_fig:
-                import matplotlib.pyplot as plt
+            # 2. Закрываем фигуру matplotlib для освобождения памяти
+            if self.current_fig:
                 plt.close(self.current_fig)
                 self.current_fig = None
             
+            # 3. Уничтожаем canvas виджет
+            if self.current_canvas:
+                self.current_canvas.get_tk_widget().destroy()
+                self.current_canvas = None
+            
+            # 4. Освобождаем захват и уничтожаем окно
             self.window.grab_release()
-        except Exception:
-            pass
-        self.window.destroy()
+            self.window.destroy()
+            
+            # 5. Принудительный сбор мусора
+            gc.collect()
+            
+            logger.debug(f"Окно #{self.instance_id} закрыто. Активных окон Velocity: {self.get_instance_count()}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии окна: {e}")
+            # Даже при ошибке пытаемся уничтожить окно
+            try:
+                self.window.destroy()
+            except:
+                pass
 
     def center_window(self):
         """Центрирует окно относительно родителя или экрана."""
@@ -207,6 +295,8 @@ class VelocityAnalysisWindow:
             text="✓ Выбрать все",
             command=self.select_all_files,
             width=12,
+            bg=Theme.ACCENT_BLUE,
+            fg="white",
             font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=2)
 
@@ -215,6 +305,8 @@ class VelocityAnalysisWindow:
             text="✗ Сбросить все",
             command=self.deselect_all_files,
             width=12,
+            bg=Theme.BG_SECONDARY,
+            fg=Theme.FG_PRIMARY,
             font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=2)
     
@@ -310,6 +402,48 @@ class VelocityAnalysisWindow:
             self.current_dir = self.available_projects[project_name]
             self._load_data_from_folder()
 
+    def _on_browse_folder(self) -> None:
+        """Открывает диалог выбора произвольной папки."""
+        from view.main_window import UIPersistence
+        
+        self.window.grab_set()
+        
+        initial_dir = UIPersistence.get_last_dir()
+        if not initial_dir:
+            initial_dir = str(APP_CONTEXT.working_dir)
+        
+        self.window.grab_release()
+        
+        directory = filedialog.askdirectory(
+            title="Выберите папку с VEL файлами",
+            initialdir=initial_dir,
+            parent=self.window
+        )
+        
+        if directory:
+            self.current_dir = Path(directory)
+            UIPersistence.set_last_dir(directory)
+            
+            # Добавляем в список проектов
+            folder_name = self.current_dir.name
+            project_key = f"{folder_name} ({self.current_dir.parent.name})"
+            self.available_projects[project_key] = self.current_dir
+            
+            # Обновляем комбобокс
+            project_names = sorted(self.available_projects.keys())
+            self._project_combo['values'] = project_names
+            self._project_var.set(project_key)
+            
+            self._load_data_from_folder()
+        
+        self.window.grab_set()
+        self.window.lift()
+
+    def _load_data_from_folder(self):
+        """Загружает данные из выбранной папки через контроллер."""
+        self.show_loading(f"Сканирование {self.current_dir.name}...")
+        self.controller.request_velocity_analysis(self, str(self.current_dir))
+    
     def create_notebook(self, parent):
         """Создаёт вкладки интерфейса."""
         self.notebook = ttk.Notebook(parent)
@@ -411,15 +545,20 @@ class VelocityAnalysisWindow:
         Args:
             message: Текст сообщения о текущей операции
         """
-        self.progress_label.config(text=message)
-        self.progress_frame.pack(fill=tk.X, pady=(0, 10))
-        self.progress_bar.start(10)
+        if self.progress_label:
+            self.progress_label.config(text=message)
+        if self.progress_frame:
+            self.progress_frame.pack(fill=tk.X, pady=(0, 10))
+        if self.progress_bar:
+            self.progress_bar.start(10)
         self.window.update()
     
     def hide_loading(self):
         """Скрывает индикатор загрузки."""
-        self.progress_bar.stop()
-        self.progress_frame.pack_forget()
+        if self.progress_bar:
+            self.progress_bar.stop()
+        if self.progress_frame:
+            self.progress_frame.pack_forget()
     
     def show_error(self, error: str):
         """
@@ -429,67 +568,23 @@ class VelocityAnalysisWindow:
             error: Текст ошибки
         """
         self.hide_loading()
-        self.status_label.config(text=f"Ошибка", fg=Theme.ACCENT_RED)
+        if self.status_label:
+            self.status_label.config(text=f"Ошибка", fg=Theme.ACCENT_RED)
         
         for frame in [self.table_frame, self.plot_frame, self.summary_frame]:
-            for widget in frame.winfo_children():
-                widget.destroy()
-            
-            tk.Label(
-                frame,
-                text=f"❌ {error}",
-                font=("Arial", 11),
-                fg=Theme.ACCENT_RED,
-                bg=Theme.BG_PRIMARY,
-            ).pack(expand=True)
+            if frame:
+                for widget in frame.winfo_children():
+                    widget.destroy()
+                
+                tk.Label(
+                    frame,
+                    text=f"❌ {error}",
+                    font=("Arial", 11),
+                    fg=Theme.ACCENT_RED,
+                    bg=Theme.BG_PRIMARY,
+                ).pack(expand=True)
     
     # ==================== ОБРАБОТЧИКИ СОБЫТИЙ UI ====================
-    
-    def _on_browse_folder(self) -> None:
-        """Открывает диалог выбора произвольной папки."""
-        from view.main_window import UIPersistence
-        
-        self.window.grab_set()
-        
-        initial_dir = UIPersistence.get_last_dir()
-        if not initial_dir:
-            initial_dir = str(APP_CONTEXT.working_dir)
-        
-        self.window.grab_release()
-        
-        directory = filedialog.askdirectory(
-            title="Выберите папку с VEL файлами",
-            initialdir=initial_dir,
-            parent=self.window
-        )
-        
-        if directory:
-            self.current_dir = Path(directory)
-            UIPersistence.set_last_dir(directory)
-            
-            # Добавляем в список проектов
-            folder_name = self.current_dir.name
-            project_key = f"{folder_name} ({self.current_dir.parent.name})"
-            self.available_projects[project_key] = self.current_dir
-            
-            # Обновляем комбобокс
-            project_names = sorted(self.available_projects.keys())
-            self._project_combo['values'] = project_names
-            self._project_var.set(project_key)
-            
-            self._load_data_from_folder()
-        
-        self.window.grab_set()
-        self.window.lift()
-
-    def _on_refresh_from_folder(self):
-        """Обновляет данные из текущей папки."""
-        self._load_data_from_folder()
-
-    def _load_data_from_folder(self):
-        """Загружает данные из выбранной папки через контроллер."""
-        self.show_loading(f"Сканирование {self.current_dir.name}...")
-        self.controller.request_velocity_analysis(self, str(self.current_dir))
     
     def on_refresh(self):
         """Обновление данных (алиас для _load_data_from_folder)."""
@@ -532,6 +627,7 @@ class VelocityAnalysisWindow:
             summary: Сводная статистика по всем файлам
         """
         self.analysis_results = results
+        self.summary_results = summary
         self.hide_loading()
         
         self.update_file_list()
@@ -539,19 +635,21 @@ class VelocityAnalysisWindow:
         self.update_summary(summary)
         self.update_plots()
         
-        file_count = len(results)
-        self.file_count_label.config(text=f"{file_count} файлов")
+        file_count = len(results) if results else 0
+        if self.file_count_label:
+            self.file_count_label.config(text=f"{file_count} файлов")
         
-        if file_count > 0:
-            self.status_label.config(
-                text=f"Готово: {file_count} файлов",
-                fg=Theme.SUCCESS
-            )
-        else:
-            self.status_label.config(
-                text="VEL файлы не найдены",
-                fg=Theme.WARNING
-            )
+        if self.status_label:
+            if file_count > 0:
+                self.status_label.config(
+                    text=f"Готово: {file_count} файлов",
+                    fg=Theme.SUCCESS
+                )
+            else:
+                self.status_label.config(
+                    text="VEL файлы не найдены",
+                    fg=Theme.WARNING
+                )
     
     def update_file_list(self):
         """
@@ -561,19 +659,21 @@ class VelocityAnalysisWindow:
         с полным именем файла при наведении.
         """
         # Очищаем старый список
-        for widget in self.file_container.winfo_children():
-            widget.destroy()
+        if self.file_container:
+            for widget in self.file_container.winfo_children():
+                widget.destroy()
         
         self.file_vars.clear()
         
-        if not self.analysis_results:
-            tk.Label(
-                self.file_container,
-                text="Нет файлов",
-                font=("Segoe UI", 10),
-                bg=Theme.BG_SECONDARY,
-                fg=Theme.FG_SECONDARY,
-            ).pack(side=tk.LEFT, padx=5)
+        if not self.analysis_results or not self.file_container:
+            if self.file_container:
+                tk.Label(
+                    self.file_container,
+                    text="Нет файлов",
+                    font=("Segoe UI", 10),
+                    bg=Theme.BG_SECONDARY,
+                    fg=Theme.FG_SECONDARY,
+                ).pack(side=tk.LEFT, padx=5)
             return
         
         # Сортируем файлы
@@ -597,6 +697,7 @@ class VelocityAnalysisWindow:
                 bg=Theme.BG_SECONDARY,
                 fg=Theme.FG_PRIMARY,
                 activebackground=Theme.HOVER,
+                selectcolor=Theme.BG_PRIMARY if Theme.BG_PRIMARY != "#FFFFFF" else "white",
                 font=("Consolas", 9),
                 anchor="w",
             )
@@ -621,7 +722,7 @@ class VelocityAnalysisWindow:
             label = tk.Label(
                 tooltip,
                 text=text,
-                bg="#ffffe0",
+                bg=Theme.BG_SECONDARY,
                 fg=Theme.FG_PRIMARY,
                 relief=tk.SOLID,
                 borderwidth=1,
@@ -672,6 +773,9 @@ class VelocityAnalysisWindow:
     
     def update_results_table(self):
         """Обновляет таблицу с результатами анализа, включая новую колонку."""
+        if not self.table_frame:
+            return
+            
         for widget in self.table_frame.winfo_children():
             widget.destroy()
         
@@ -691,6 +795,22 @@ class VelocityAnalysisWindow:
         tree_frame = tk.Frame(self.table_frame, bg=Theme.BG_PRIMARY)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Настройка стилей для Treeview
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Treeview",
+                        background=Theme.BG_SECONDARY,
+                        foreground=Theme.FG_PRIMARY,
+                        fieldbackground=Theme.BG_SECONDARY,
+                        borderwidth=0)
+        style.map('Treeview', background=[('selected', Theme.SELECTED)])
+        style.configure("Treeview.Heading",
+                        background=Theme.BG_TERTIARY,
+                        foreground=Theme.FG_PRIMARY,
+                        relief="flat")
+        style.map("Treeview.Heading",
+                  background=[('active', Theme.HOVER)])
+        
         tree = ttk.Treeview(
             tree_frame,
             columns=columns,
@@ -698,21 +818,20 @@ class VelocityAnalysisWindow:
             height=20
         )
         
-        widths = [200, 60, 120, 70, 70, 70, 70, 70, 100]  # Увеличили под новую колонку
+        widths = [200, 60, 120, 70, 70, 70, 70, 70, 100]
         for col, width in zip(columns, widths):
             tree.heading(col, text=col)
-            tree.column(col, width=width, minwidth=50)
+            tree.column(col, width=width, minwidth=50, anchor='center')
         
+        # Добавляем данные
         for filename, result in self.analysis_results.items():
             # Универсальная проверка типа (поддержка dict и объектов)
             if isinstance(result, dict):
                 data = result.get('data', {})
                 stats = result.get('statistics', {})
-                height_4th_diff_array = stats.get('height_4th_diff_array', None)
             else:
                 data = getattr(result, 'data', {})
                 stats = getattr(result, 'statistics', {})
-                height_4th_diff_array = getattr(stats, 'height_4th_diff_array', None)
             
             # Получаем данные с проверкой типа
             if isinstance(data, dict):
@@ -723,7 +842,7 @@ class VelocityAnalysisWindow:
                 max_v_up = stats.get('max_v_up', 0)
                 max_speed_2d = stats.get('max_speed_2d', 0)
                 max_speed_3d = stats.get('max_speed_3d', 0)
-                max_height_4th_diff = stats.get('max_height_4th_diff', 0)  # НОВОЕ ПОЛЕ
+                max_height_4th_diff = stats.get('max_height_4th_diff', 0)
             else:
                 time_span = getattr(data, 'time_span', [0, 0])
                 rows = getattr(stats, 'rows_analyzed', 0)
@@ -732,12 +851,15 @@ class VelocityAnalysisWindow:
                 max_v_up = getattr(stats, 'max_v_up', 0)
                 max_speed_2d = getattr(stats, 'max_speed_2d', 0)
                 max_speed_3d = getattr(stats, 'max_speed_3d', 0)
-                max_height_4th_diff = getattr(stats, 'max_height_4th_diff', 0)  # НОВОЕ ПОЛЕ
+                max_height_4th_diff = getattr(stats, 'max_height_4th_diff', 0)
             
-            time_span_str = f"{time_span[0]:.0f}-{time_span[1]:.0f}с" if time_span else "0-0с"
+            time_span_str = f"{time_span[0]:.0f}-{time_span[1]:.0f}с" if time_span and len(time_span) > 1 else "0-0с"
+            
+            # Форматируем числа
+            display_filename = filename[:30] + "..." if len(filename) > 30 else filename
             
             values = [
-                filename[:30] + "..." if len(filename) > 30 else filename,
+                display_filename,
                 rows,
                 time_span_str,
                 f"{max_v_e:.3f}",
@@ -745,7 +867,7 @@ class VelocityAnalysisWindow:
                 f"{max_v_up:.3f}",
                 f"{max_speed_2d:.3f}",
                 f"{max_speed_3d:.3f}",
-                f"{max_height_4th_diff:.3f}",  # НОВОЕ ПОЛЕ
+                f"{max_height_4th_diff:.3f}",
             ]
             
             tree.insert('', 'end', values=values)
@@ -763,6 +885,9 @@ class VelocityAnalysisWindow:
         Args:
             summary: Словарь со сводной статистикой от контроллера
         """
+        if not self.summary_frame:
+            return
+            
         for widget in self.summary_frame.winfo_children():
             widget.destroy()
         
@@ -786,22 +911,48 @@ class VelocityAnalysisWindow:
             padx=10,
             pady=10,
         )
-        text_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        scrollbar = tk.Scrollbar(self.summary_frame, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Настройка тегов
+        text_widget.tag_config("header", foreground=Theme.ACCENT_BLUE, font=("Consolas", 11, "bold"))
+        text_widget.tag_config("value", foreground=Theme.SUCCESS, font=("Consolas", 10, "bold"))
+        text_widget.tag_config("warning", foreground=Theme.WARNING)
         
         max_vel = summary.get('max_velocities', {})
         max_speed = summary.get('max_speeds', {})
-        # СЫРОЙ МАКСИМУМ ИЗ МОДЕЛИ
         max_height_diff = summary.get('max_height_4th_diff', 0)
         
-        text_widget.insert(tk.END, f"Файлов: {summary.get('total_files', 0)}\n\n")
-        text_widget.insert(tk.END, f"Макс V_E: {max_vel.get('v_e', 0):.3f} м/с\n")
-        text_widget.insert(tk.END, f"Макс V_N: {max_vel.get('v_n', 0):.3f} м/с\n")
-        text_widget.insert(tk.END, f"Макс V_UP: {max_vel.get('v_up', 0):.3f} м/с\n")
-        text_widget.insert(tk.END, f"Макс 2D: {max_speed.get('2d', 0):.3f} м/с\n")
-        text_widget.insert(tk.END, f"Макс 3D: {max_speed.get('3d', 0):.3f} м/с\n")
-        # СЫРОЙ МАКСИМУМ
-        text_widget.insert(tk.END, f"Макс 4-я разность высоты: {max_height_diff:.3f} м\n")
-        text_widget.insert(tk.END, f"\n⚠️ Все значения отображаются в сыром виде (без фильтрации)\n")
+        text_widget.insert(tk.END, "📊 СВОДНАЯ СТАТИСТИКА\n", "header")
+        text_widget.insert(tk.END, "═"*40 + "\n\n")
+        
+        text_widget.insert(tk.END, f"📁 Файлов: ")
+        text_widget.insert(tk.END, f"{summary.get('total_files', 0)}\n", "value")
+        
+        text_widget.insert(tk.END, f"\n📈 МАКСИМАЛЬНЫЕ СКОРОСТИ:\n", "header")
+        text_widget.insert(tk.END, f"   V_E (Восток): ")
+        text_widget.insert(tk.END, f"{max_vel.get('v_e', 0):.3f} м/с\n", "value")
+        text_widget.insert(tk.END, f"   V_N (Север): ")
+        text_widget.insert(tk.END, f"{max_vel.get('v_n', 0):.3f} м/с\n", "value")
+        text_widget.insert(tk.END, f"   V_UP (Вертикаль): ")
+        text_widget.insert(tk.END, f"{max_vel.get('v_up', 0):.3f} м/с\n", "value")
+        
+        text_widget.insert(tk.END, f"\n📐 МАКСИМАЛЬНЫЕ СКОРОСТИ:\n", "header")
+        text_widget.insert(tk.END, f"   2D (горизонтальная): ")
+        text_widget.insert(tk.END, f"{max_speed.get('2d', 0):.3f} м/с\n", "value")
+        text_widget.insert(tk.END, f"   3D (полная): ")
+        text_widget.insert(tk.END, f"{max_speed.get('3d', 0):.3f} м/с\n", "value")
+        
+        text_widget.insert(tk.END, f"\n📏 ВЫСОТА:\n", "header")
+        text_widget.insert(tk.END, f"   Макс. 4-я разность: ")
+        text_widget.insert(tk.END, f"{max_height_diff:.3f} м\n", "value")
+        
+        text_widget.insert(tk.END, f"\n{'─'*40}\n")
+        text_widget.insert(tk.END, f"⚠️ Все значения в сыром виде (без фильтрации)\n", "warning")
         
         text_widget.config(state=tk.DISABLED)
     
@@ -811,39 +962,51 @@ class VelocityAnalysisWindow:
         Теперь отображает 5 графиков: V_E, V_N, V_UP, Hei, Hei 4th Diff.
         ВСЕ ДАННЫЕ ОТОБРАЖАЮТСЯ В СЫРОМ ВИДЕ БЕЗ ФИЛЬТРАЦИИ.
         """
-        for widget in self.plot_frame.winfo_children():
-            widget.destroy()
+        # Закрываем старую фигуру и очищаем ресурсы ПЕРЕД созданием новой
+        if self.current_fig:
+            plt.close(self.current_fig)
+            self.current_fig = None
         
-        if not self.analysis_results:
-            tk.Label(
-                self.plot_frame,
-                text="Нет данных",
-                font=("Arial", 11),
-                fg=Theme.FG_SECONDARY,
-                bg=Theme.BG_PRIMARY,
-            ).pack(expand=True)
+        if self.interactive_zoom:
+            self.interactive_zoom.cleanup()
+            self.interactive_zoom = None
+        
+        if self.current_canvas:
+            self.current_canvas.get_tk_widget().destroy()
+            self.current_canvas = None
+        
+        if self.plot_frame:
+            for widget in self.plot_frame.winfo_children():
+                widget.destroy()
+        
+        if not self.analysis_results or not self.plot_frame:
+            if self.plot_frame:
+                tk.Label(
+                    self.plot_frame,
+                    text="Нет данных",
+                    font=("Arial", 11),
+                    fg=Theme.FG_SECONDARY,
+                    bg=Theme.BG_PRIMARY,
+                ).pack(expand=True)
             return
         
         selected_files = self.get_selected_files()
         
         if not selected_files:
-            tk.Label(
-                self.plot_frame,
-                text="Не выбрано файлов",
-                font=("Arial", 11),
-                fg=Theme.WARNING,
-                bg=Theme.BG_PRIMARY,
-            ).pack(expand=True)
+            if self.plot_frame:
+                tk.Label(
+                    self.plot_frame,
+                    text="Не выбрано файлов",
+                    font=("Arial", 11),
+                    fg=Theme.WARNING,
+                    bg=Theme.BG_PRIMARY,
+                ).pack(expand=True)
             return
         
         try:
             # Пять графиков в одной колонке
             fig, axes = plt.subplots(5, 1, figsize=(16, 2.5), sharex=True)
-            fig.patch.set_facecolor('white')
-            
-            # Цветовая палитра
-            colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
-                    '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#fabed4']
+            fig.patch.set_facecolor(Theme.BG_SECONDARY)
             
             self.plot_lines = {}
             
@@ -897,56 +1060,47 @@ class VelocityAnalysisWindow:
                     continue
                 
                 # Прореживаем для производительности (только для отображения, не меняет значения)
+                plot_time = time
+                plot_v_e = v_e
+                plot_v_n = v_n
+                plot_v_up = v_up
+                plot_height = height
+                
                 if len(time) > 1000:
                     step = len(time) // 1000
-                    time = time[::step]
-                    v_e = v_e[::step]
-                    v_n = v_n[::step]
-                    v_up = v_up[::step]
-                    height = height[::step]
+                    plot_time = time[::step]
+                    plot_v_e = v_e[::step]
+                    plot_v_n = v_n[::step]
+                    plot_v_up = v_up[::step]
+                    plot_height = height[::step]
                 
-                    # === ИСПОЛЬЗУЕМ РАССЧИТАННУЮ 4-Ю РАЗНОСТЬ ИЗ МОДЕЛИ ===
-                    # Получаем filename из текущей итерации цикла
-                    current_filename = filename
-                    result = self.analysis_results[current_filename]
-
-                    if isinstance(result, dict):
-                        stats = result.get('statistics', {})
-                        height_4th_diff = stats.get('height_4th_diff_array', np.array([]))
-                    else:
-                        stats = getattr(result, 'statistics', None)
-                        height_4th_diff = getattr(stats, 'height_4th_diff_array', np.array([])) if stats else np.array([])
-
-                    # Если по какой-то причине массив пустой или None, вычисляем на месте как запасной вариант
-                    if height_4th_diff is None or len(height_4th_diff) == 0:
-                        # === ИСПОЛЬЗУЕМ ГОТОВЫЙ МАССИВ 4-Й РАЗНОСТИ ИЗ МОДЕЛИ ===
-                        current_filename = filename
-                        result = self.analysis_results[current_filename]
-
-                        # Универсальное получение данных (поддержка dict и объекта)
-                        if isinstance(result, dict):
-                            stats = result.get('statistics', {})
-                            height_4th_diff = stats.get('height_4th_diff', np.array([]))
-                        else:
-                            stats = getattr(result, 'statistics', None)
-                            height_4th_diff = getattr(stats, 'height_4th_diff', np.array([])) if stats else np.array([])
-
-                        # Если по какой-то причине массив пустой — считаем на месте (запасной вариант)
-                        if height_4th_diff is None or len(height_4th_diff) == 0:
-                            height_4th_diff = self.calculate_4th_diff(height)  # эту функцию можно оставить
+                # Получаем рассчитанную 4-ю разность из модели
+                if isinstance(result, dict):
+                    stats = result.get('statistics', {})
+                    height_4th_diff = stats.get('height_4th_diff_array', np.array([]))
+                else:
+                    stats = getattr(result, 'statistics', None)
+                    height_4th_diff = getattr(stats, 'height_4th_diff_array', np.array([])) if stats else np.array([])
+                
+                # Если по какой-то причине массив пустой или None, вычисляем на месте как запасной вариант
+                if height_4th_diff is None or len(height_4th_diff) == 0:
+                    height_4th_diff = self.calculate_4th_diff(height)
+                
+                # Применяем то же прореживание к 4-й разности, если нужно
+                plot_height_4th_diff = height_4th_diff
+                if len(height_4th_diff) > 1000 and len(height_4th_diff) > 0:
+                    step = len(height_4th_diff) // 1000
+                    plot_height_4th_diff = height_4th_diff[::step]
                 
                 # НИКАКОЙ ФИЛЬТРАЦИИ - ОТОБРАЖАЕМ КАК ЕСТЬ
-                # Даже если есть NaN или Inf, matplotlib их просто не отобразит
-                
-                color = colors[idx % len(colors)]
+                color = self.PLOT_COLORS[idx % len(self.PLOT_COLORS)]
                 label = filename[:12] + "..." if len(filename) > 12 else filename
                 
-                line0, = axes[0].plot(time, v_e, color=color, linewidth=1.2, label=label)
-                line1, = axes[1].plot(time, v_n, color=color, linewidth=1.2, label=label)
-                line2, = axes[2].plot(time, v_up, color=color, linewidth=1.2, label=label)
-                line3, = axes[3].plot(time, height, color=color, linewidth=1.2, label=label)
-                # СЫРЫЕ ДАННЫЕ - БЕЗ ФИЛЬТРАЦИИ
-                line4, = axes[4].plot(time, height_4th_diff, color=color, linewidth=1.2, label=label)
+                line0, = axes[0].plot(plot_time, plot_v_e, color=color, linewidth=1.2, label=label)
+                line1, = axes[1].plot(plot_time, plot_v_n, color=color, linewidth=1.2, label=label)
+                line2, = axes[2].plot(plot_time, plot_v_up, color=color, linewidth=1.2, label=label)
+                line3, = axes[3].plot(plot_time, plot_height, color=color, linewidth=1.2, label=label)
+                line4, = axes[4].plot(plot_time, plot_height_4th_diff, color=color, linewidth=1.2, label=label)
                 
                 self.plot_lines[filename] = {
                     'V_E': line0,
@@ -960,6 +1114,8 @@ class VelocityAnalysisWindow:
             from matplotlib.ticker import FuncFormatter
             
             def format_time(seconds, pos):
+                if seconds is None:
+                    return ""
                 hours = int(seconds // 3600)
                 minutes = int((seconds % 3600) // 60)
                 return f"{hours:02d}:{minutes:02d}"
@@ -969,27 +1125,27 @@ class VelocityAnalysisWindow:
                 ax.xaxis.set_major_formatter(FuncFormatter(format_time))
                 ax.set_ylabel(axis_titles[i].split('[')[1].replace(']', ''))
                 ax.set_title(axis_titles[i], fontsize=10, fontweight='bold')
-                ax.grid(True, alpha=0.3)
+                ax.grid(True, alpha=0.3, color=Theme.BORDER)
+                ax.set_facecolor(Theme.BG_SECONDARY)
+                ax.tick_params(colors=Theme.FG_SECONDARY)
+                for spine in ax.spines.values():
+                    spine.set_color(Theme.BORDER)
+                
                 if i < 3 or i == 4:
-                    ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+                    ax.axhline(y=0, color=Theme.BORDER, linestyle='--', alpha=0.5, linewidth=0.8)
                 
                 if i == 0 and ax.lines:
-                    ax.legend(loc='upper right', fontsize=8, ncol=2)
+                    ax.legend(loc='upper right', fontsize=8, ncol=2, 
+                             facecolor=Theme.BG_SECONDARY, 
+                             edgecolor=Theme.BORDER,
+                             labelcolor=Theme.FG_PRIMARY)
             
-            axes[4].set_xlabel('Время (часы:минуты)')
+            axes[4].set_xlabel('Время (часы:минуты)', color=Theme.FG_PRIMARY)
             
             plt.tight_layout()
             
             canvas = FigureCanvasTkAgg(fig, self.plot_frame)
             canvas.draw()
-            
-            # Очищаем старый зум
-            if self.interactive_zoom:
-                try:
-                    self.interactive_zoom.cleanup()
-                except:
-                    pass
-                self.interactive_zoom = None
             
             self.interactive_zoom = InteractiveZoom(fig, axes)
             self.current_fig = fig
@@ -1012,13 +1168,14 @@ class VelocityAnalysisWindow:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            tk.Label(
-                self.plot_frame,
-                text=f"Ошибка построения графика:\n{str(e)}",
-                font=("Arial", 11),
-                fg=Theme.ERROR,
-                bg=Theme.BG_PRIMARY,
-            ).pack(expand=True)
+            if self.plot_frame:
+                tk.Label(
+                    self.plot_frame,
+                    text=f"Ошибка построения графика:\n{str(e)}",
+                    font=("Arial", 11),
+                    fg=Theme.ERROR,
+                    bg=Theme.BG_PRIMARY,
+                ).pack(expand=True)
     
     def calculate_4th_diff(self, data: np.ndarray) -> np.ndarray:
         """
@@ -1046,7 +1203,6 @@ class VelocityAnalysisWindow:
             fourth_diff = np.diff(data, n=4, prepend=data[:4])
             
             # НИКАКОЙ ОБРАБОТКИ - ВОЗВРАЩАЕМ КАК ЕСТЬ
-            # Пусть matplotlib сам решает, как отображать NaN и Inf
             return fourth_diff
             
         except Exception as e:

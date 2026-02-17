@@ -970,14 +970,19 @@ class ApplicationController:
 
         GPSAnalysisWindow(self._window.window, self)
 
-    def request_gps_analysis(self, window: GPSAnalysisWindow, folder_path: str) -> None:
+    def request_gps_analysis(self, window: GPSAnalysisWindow, folder_path: Optional[str] = None) -> None:
         """
         Выполняет анализ GPS созвездия по запросу из окна анализа.
-
+        
         Args:
             window: Экземпляр окна анализа GPS
-            folder_path: Путь к папке с данными для анализа
+            folder_path: Путь к папке с данными для анализа.
+                         Если None, используется стандартная папка результатов.
         """
+        # Устанавливаем путь, если он не был передан
+        if folder_path is None:
+            folder_path = str(APP_CONTEXT.results_dir)
+        
         window.current_dir = Path(folder_path)
 
         self._perform_analysis(
